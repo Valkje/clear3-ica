@@ -3,8 +3,14 @@ title: "R Notebook"
 output: html_notebook
 ---
 
-```{r}
-library(dplyr)
+```{r setup}
+library(gsignal)
+library(tidyverse)
+library(GGally)
+library(scales)
+library(lubridate)
+
+filter <- dplyr::filter
 
 setwd("M:/Documents/Autocorrelation")
 ```
@@ -70,16 +76,11 @@ dat %>%
 dat
 ```
 
-# Suicidal women data
+# Perimenstrual suicidality data
 
 ```{r}
 dat_kp <- read.csv("data/User_3009_keypressDataMetrics.csv")
 dat_kp
-```
-
-```{r}
-dat_acc <- read.csv("data/User_3009_accelData.csv")
-dat_acc
 ```
 
 ```{r}
@@ -92,6 +93,20 @@ dat_kp <- dat_kp %>%
 ```
 
 ```{r}
+dat_acc <- read.csv("data/User_3009_accelData.csv")
+dat_acc
+```
+
+```{r}
+dat_acc <- dat_acc %>%
+  mutate(
+    date = as.Date(date, format = "%Y-%m-%d"),
+    sessionTimestampLocal = as.POSIXct(sessionTimestampLocal, format = "%Y-%m-%d %H:%M:%OS")
+  )
+```
+
+
+```{r}
 dat_kp_avg <- dat_kp %>%
   mutate(hour = format(keypressTimestampLocal, "%H")) %>%
   group_by(hour, sessionNumber) %>%
@@ -102,9 +117,101 @@ dat_kp_avg <- dat_kp %>%
 plot(dat_kp_avg$hour, dat_kp_avg$meanIKD, type = "b")
 ```
 
-Session level
+
+
+# Playing with filters
 
 ```{r}
+but <- butter(2, w = 0.8, plane = "z", type = "low", output = "Sos")
+but
+```
+
+```{r fig.height=8}
+freqz(but, fs = 10)
+```
+
+```{r}
+zplane(but) # Filter is stable, poles (X) lie in unit circle
+```
+
+```{r}
+acc_max_ses <- dat_acc %>%
+  group_by(sessionNumber) %>%
+  mutate(N = n()) %>%
+  ungroup() %>%
+  filter(N == max(N))
+head(acc_max_ses)
+```
+
+```{r}
+long_acc_ses <- acc_max_ses %>%
+  mutate(idx = 1:n()) %>%
+  select(idx, sessionTimestampLocal, x, y, z) %>%
+  pivot_longer(c(x, y, z), names_to = "direction")
+
+ggplot(long_acc_ses) +
+  geom_line(aes(x = idx, y = value, color = direction))
+```
+
+```{r}
+long_acc_ses <- long_acc_ses %>%
+  group_by(direction) %>%
+  mutate(filtered = gsignal::filtfilt(but, value))
+```
+
+```{r fig.height=8}
+ggplot(long_acc_ses, aes(x = idx, color = direction)) +
+  geom_line(aes(y = filtered), size = 1.1) +
+  geom_line(aes(y = value), linetype = "dotted", size = 1.1) +
+  xlim(800, 900)
+```
+
+Actually applying the filter per session:
+
+```{r}
+dat_acc <- dat_acc %>%
+  group_by(sessionNumber) %>%
+  mutate(
+    xFiltered = filtfilt(but, x),
+    yFiltered = filtfilt(but, y),
+    zFiltered = filtfilt(but, z)
+  )
+```
+
+Mark samples and sessions as active or not active.
+
+```{r}
+dat_acc <- dat_acc %>%
+  mutate(
+    magnitude = sqrt(xFiltered^2 + yFiltered^2 + zFiltered ^2),
+    activeSample = magnitude < 0.95 | magnitude > 1.05
+  ) %>%
+  group_by(sessionNumber) %>%
+  mutate(
+    activeSes = sum(activeSample) / n() > 0.08,
+    xMedian = median(xFiltered),
+    zMedian = median(zFiltered),
+    upright = zMedian < 0.1 & xMedian >= -0.2 & xMedian <= 0.2
+  )
+```
+
+```{r}
+ggplot(dat_acc) +
+  geom_point(aes(x = xFiltered, y = zFiltered, color = upright), alpha = 0.1)
+```
+
+# Calculating session level data
+
+```{r}
+dat_acc_ses <- dat_acc %>%
+  group_by(sessionNumber) %>%
+  summarize(
+    active = activeSes[1],
+    upright = upright[1]
+  )
+
+dat_acc_ses
+
 dat_ses <- dat_kp %>%
   group_by(sessionNumber) %>%
   mutate(
@@ -112,23 +219,299 @@ dat_ses <- dat_kp %>%
     backspaceRate = sum(keypress_type == "backspace") / n(),
     totalKeyPresses = n()
   ) %>%
+  left_join(dat_acc_ses, by = "sessionNumber") %>%
   filter(keypress_type == "alphanum", previousKeyType == "alphanum") %>%
-  summarise(
+  summarize(
     medianIKD = median(IKD, na.rm = TRUE),
     percent95IKD = quantile(IKD, .95, na.rm = TRUE),
     madIKD = mad(IKD, na.rm = TRUE),
     autocorrectRate = autocorrectRate[1],
     backspaceRate = backspaceRate[1],
     sessionTimestampLocal = sessionTimestampLocal[1],
-    totalKeyPresses = totalKeyPresses[1]
+    totalKeyPresses = totalKeyPresses[1],
+    active = active[1],
+    upright = upright[1],
+    hour = format(sessionTimestampLocal, "%H"),
+    date = as.Date(sessionTimestampLocal)
   )
 
 dat_ses
 ```
 
+Aggregating per hour:
+
+```{r}
+dat_hour <- dat_ses %>%
+  group_by(date, hour) %>%
+  summarize(
+    totalKeyPresses = sum(totalKeyPresses),
+    active = sum(active) / n(),
+    upright = sum(upright) / n()
+  )
+
+head(dat_hour)
+```
+
+```{r fig.height=8, fig.width=20}
+ggplot(dat_hour %>% pivot_longer(c(active, upright), names_to = "modality", values_to = "proportion")) +
+  geom_point(aes(hour, date, color = proportion, size = totalKeyPresses)) +
+  facet_grid(cols = vars(modality)) +
+  scale_color_gradientn(colors = hcl.colors(256)) +
+  theme_light() + 
+  theme(text = element_text(size = 18), panel.border = element_blank())
+```
+
+
+Interesting (but perhaps also expected) to see the effect of the number of key presses on the median vs mad distribution. Few key presses means low variability even at high median IKDs.
+
 ```{r}
 with(dat_ses, {
-  plot(medianIKD, madIKD)
+  plot(medianIKD, madIKD, main = "All sessions")
+})
+
+with(filter(dat_ses, totalKeyPresses > 10), {
+  plot(medianIKD, madIKD, main = "Sessions with >10 key presses")
 })
 ```
+
+```{r fig.height=8}
+dat_ses_avg <- dat_ses %>%
+  filter(sessionTimestampLocal > 10) %>%
+  group_by(hour) %>%
+  summarise(
+    SE = sd(medianIKD) / sqrt(n()),
+    meanIKD = mean(medianIKD),
+    N = n()
+  )
+
+with(dat_ses_avg, {
+  par(mfrow = c(2, 1))
+  
+  plot(hour, meanIKD, type = "b", 
+       main = "Mean of median IKDs over 24 hours",
+       ylim = c(0.2, 0.6))
+  grid(NA, NULL)
+
+  x <- 0:(length(hour)-1)
+  arrows(x, meanIKD - SE, x, meanIKD + SE, length = 0.05, angle = 90, code = 3)
+  
+  plot(hour, N, type = "b", 
+       main = "Number of recorded sessions over 24 hours",
+       ylim = c(0, 600))
+})
+```
+
+```{r fig.height=8}
+with(dat_ses, {
+  nColors <- 256
+  pal <- hcl.colors(nColors)
+  medianIKD_idx <- pmin(floor(1/medianIKD / quantile(1/medianIKD, .95) * nColors), nColors)
+  hist(medianIKD_idx)
+  
+  plot(hour, date, pch = 20, cex = log(totalKeyPresses / 10), 
+       col = pal[medianIKD_idx], bty = "n")
+  grid(NULL, NULL)
+})
+```
+
+```{r fig.height=8}
+ggplot(dat_ses) +
+  geom_point(aes(hour, date, color = 1 / medianIKD, size = totalKeyPresses)) +
+  scale_color_gradientn(colors = hcl.colors(256)) +
+  theme_light() + 
+  theme(text = element_text(size = 18), panel.border = element_blank())
+```
+
+# Entropy
+
+```{r}
+dat_kp_alphanum <- dat_kp %>%
+  filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+
+ggplot(dat_kp_alphanum) +
+  geom_point(aes(x = distanceFromPrevious, y = IKD), alpha = 0.2)
+```
+
+```{r fig.height=7}
+ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
+  geom_bin_2d(bins = 100) +
+  scale_fill_continuous(type = "viridis")
+
+ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
+  geom_bin_2d(bins = 100) +
+  scale_x_continuous(limits = c(0, 300)) +
+  scale_y_continuous(limits = c(0, 0.5)) +
+  scale_fill_continuous(type = "viridis")
+```
+
+Extract the 2D histogram from the ggplot object. From that histogram, we will calculate breaks to be used in the construction of histograms of subsets of the data.
+
+```{r}
+h <- ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
+  geom_bin_2d(bins = 100)
+
+hist2d <- ggplot_build(h)$data[[1]]
+
+edges <- list(x = sort(unique(hist2d$xmin)), y = sort(unique(hist2d$ymin)))
+
+hist2d
+```
+
+Partition the data in time frames of a month, calculate the normalised 2D histograms, and then calculate the KL divergence from the first month.
+
+We denote the overall histogram as our model distribution $Q$, and all other, time-windowed histograms as our observation distributions $P$. (I would have liked to set $Q$ to the very first time-windowed histogram, but then we run into division by 0 problems, leading to infinite relative entropy.)
+
+Prepare for some next-level data wrangling.
+
+```{r}
+histQ <- ggplot_build(
+  ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
+    geom_bin_2d(breaks = edges))$data[[1]]
+
+hists <- dat_kp_alphanum %>%
+  group_by(
+    year = year(sessionTimestampLocal), 
+    month = month(sessionTimestampLocal), 
+    week = week(sessionTimestampLocal)
+  ) %>%
+  nest() %>%
+  mutate(
+    hist = map(data, function (df) {
+      ggplot_build(
+        ggplot(df, aes(x = distanceFromPrevious, y = IKD)) +
+          geom_bin_2d(breaks = edges)
+      )$data[[1]]
+    }),
+    entropy = map_dbl(hist, function(hist) {
+      sum(hist$density * log2(1 / hist$density))
+    }),
+    KL_divergence = map_dbl(hist, function(hist) {
+      joint <- hist %>%
+        full_join(histQ, by = c("xbin", "ybin"), suffix = c(".P", ".Q")) %>%
+        filter(!is.na(density.P))
+      
+      sum(joint$density.P * log2(joint$density.P / joint$density.Q))
+    })
+  )
+
+hists
+# kl_div <- select(hists, year, month, week, KL_divergence)
+```
+
+```{r}
+dat_kp_kl <- hists %>%
+  unnest(cols = data) %>% 
+  group_by(sessionNumber) %>%
+  summarize(
+    entropy = entropy[1],
+    KL_divergence = KL_divergence[1]
+  )
+
+dat_ses <- dat_ses %>%
+  inner_join(dat_kp_kl, by = "sessionNumber")
+
+dat_ses
+```
+
+```{r fig.height=8}
+ggpairs(dat_ses %>% 
+          filter(totalKeyPresses > 10) %>%
+          select(!c(sessionNumber, hour, sessionTimestampLocal, date)),
+        alpha = 0.1)
+```
+
+
+# Self-report data
+
+```{r}
+dat_rep <- read.csv("../CLEAR3_Biaffect_Leow/Archived Versions/2022-02-15 - Updated Daily Dataset for Elena and Alex/20220215_clear3daily.csv")
+head(dat_rep)
+```
+
+Write table of every column:
+
+```{r}
+fname <- "rep_var_tables.txt"
+file.create(fname)
+
+for (col in colnames(dat_rep)) {
+  write(paste("#######################", col, "#######################\n"), file = fname, append = TRUE)
+  
+  write.table(table(dat_rep[[col]]), file = fname, append = TRUE)
+}
+```
+
+For now, only look at the self-report data of our subject of the key press data.
+
+```{r}
+dat_rep <- dat_rep %>%
+  filter(id == dat_kp$userID[1]) %>%
+  mutate(daterated = as.Date(daterated, format = "%m/%d/%Y"))
+
+dat_rep
+```
+
+Join with the KL divergence data:
+
+```{r}
+dat_rep <- dat_rep %>%
+  mutate(
+    year = year(daterated), 
+    month = month(daterated), 
+    week = week(daterated)
+  ) %>%
+  left_join(kl_div, by = c("year", "month", "week"))
+
+dat_rep
+```
+
+
+```{r}
+ggplot(dat_rep, aes(x = daterated)) +
+  geom_line(aes(y = KL_divergence), size = 1.05) +
+  scale_x_date(labels = date_format("%Y-%m"), limits = c(min(dat_rep$daterated), as.Date("2021-07-11")))
+```
+
+
+```{r fig.height=8}
+ggplot(dat_rep, aes(x = daterated)) + 
+  geom_line(aes(y = irritability_mean, color = KL_divergence, group = 1), size = 1.05) +
+  geom_point(aes(y = firstdayofperiod)) + 
+  scale_x_date(labels = date_format("%Y-%m"), limits = c(min(dat_rep$daterated), as.Date("2021-07-11"))) + 
+  scale_color_gradientn(colors = hcl.colors(256, palette = "viridis")) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+stress_cols <- na.omit(str_extract(colnames(dat_rep), "^stress.*"))
+ggplot(dat_rep %>%
+    pivot_longer(all_of(stress_cols), names_to = "stress")) +
+  geom_point(aes(x = daterated, y = value, color = stress)) + 
+  scale_x_date(labels = date_format("%Y-%m"), limits = c(min(dat_rep$daterated), as.Date("2021-04-01"))) + 
+  scale_fill_manual(values = hcl.colors(15)) +
+  ylim(0, 1.1) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+Anything that can predict divergence? Time for a SPLOM (scatter plot matrix).
+
+```{r fig.height=8}
+ggpairs(dat_rep %>% select(
+  menstrualbleeding, 
+  numdrinks_yest, 
+  workday, 
+  sleepdur_yest, 
+  physicaltension, 
+  wishsleep, 
+  MJuse, 
+  irritability_mean,
+  KL_divergence))
+```
+
+```{r}
+ggplot(dat_rep, aes(x = wishsleep, y = irritability_mean)) +
+  geom_bin_2d()
+```
+
+
 
