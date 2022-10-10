@@ -259,6 +259,8 @@ ggplot(dat_hour %>% pivot_longer(c(active, upright), names_to = "modality", valu
   scale_color_gradientn(colors = hcl.colors(256)) +
   theme_light() + 
   theme(text = element_text(size = 18), panel.border = element_blank())
+
+ggsave("images/typing_pattern.png", width = 1920, height = 1080, units = "px", dpi = 110)
 ```
 
 
@@ -332,16 +334,32 @@ ggplot(dat_kp_alphanum) +
   geom_point(aes(x = distanceFromPrevious, y = IKD), alpha = 0.2)
 ```
 
+```{r}
+save_and_plot <- function(h, title, res = 200) {
+  png(title, width = 1920, height = 1080, res = res)
+  print(h)
+  dev.off()
+  
+  print(h)
+}
+```
+
+
 ```{r fig.height=7}
-ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
+h <- ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
   geom_bin_2d(bins = 100) +
+  labs(x = "distanceFromPrevious (iPhone 12 points)", y = "IKD (s)") +
   scale_fill_continuous(type = "viridis")
 
-ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
+save_and_plot(h, "images/hist2d_overall.png")
+
+h <- ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
   geom_bin_2d(bins = 100) +
   scale_x_continuous(limits = c(0, 300)) +
   scale_y_continuous(limits = c(0, 0.5)) +
   scale_fill_continuous(type = "viridis")
+
+save_and_plot(h, "images/hist2d_overall_zoomed.png")
 ```
 
 Extract the 2D histogram from the ggplot object. From that histogram, we will calculate breaks to be used in the construction of histograms of subsets of the data.
@@ -377,10 +395,17 @@ hists <- dat_kp_alphanum %>%
   nest() %>%
   mutate(
     hist = map(data, function (df) {
-      ggplot_build(
+      h <- ggplot_build(
         ggplot(df, aes(x = distanceFromPrevious, y = IKD)) +
           geom_bin_2d(breaks = edges)
-      )$data[[1]]
+      )
+      
+      # png(paste("images/hist2d_week_", cur_group_id(), ".png", sep = ""), 
+      #     width = 1920, height = 1080, res = 200)
+      # print(h)
+      # dev.off()
+      
+      h$data[[1]]
     }),
     entropy = map_dbl(hist, function(hist) {
       sum(hist$density * log2(1 / hist$density))
@@ -395,8 +420,22 @@ hists <- dat_kp_alphanum %>%
   )
 
 hists
-# kl_div <- select(hists, year, month, week, KL_divergence)
 ```
+
+```{r, fig.height=8}
+png("images/entropy.png", width = 1650, height = 1200, res = 200)
+
+par(mfrow = c(2, 1), mai = c(1, 1, 0.1, 0.1))
+with(hists, {
+  plot(week, entropy, type = "b", col = "steelblue", lwd = 2)
+  grid(NULL, NULL)
+  plot(week, KL_divergence, type = "b", col = "darkred", lwd = 2)
+  grid(NULL, NULL)
+})
+
+dev.off()
+```
+
 
 ```{r}
 dat_kp_kl <- hists %>%
@@ -413,18 +452,46 @@ dat_ses <- dat_ses %>%
 dat_ses
 ```
 
-```{r fig.height=8}
+```{r fig.height=9}
 ggpairs(dat_ses %>% 
           filter(totalKeyPresses > 10) %>%
-          select(!c(sessionNumber, hour, sessionTimestampLocal, date)),
-        alpha = 0.1)
+          group_by(date) %>%
+          summarise(
+            medianIKD = mean(medianIKD),
+            percent95IKD = mean(percent95IKD),
+            madIKD = mean(madIKD),
+            autocorrectRate = mean(autocorrectRate),
+            backspaceRate = mean(backspaceRate),
+            active = mean(active),
+            upright = mean(upright),
+            entropy = entropy[1],
+            KL_divergence = KL_divergence[1]
+          ) %>%
+          select(!c(date)),
+        progress = FALSE) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggsave("images/splom.png", width = 1920, height = 1080, dpi = 120, unit = "px")
+```
+
+```{r}
+png("images/splom.png", width = 1920, height = 1080, res = 120)
+
+ggpairs(dat_ses %>% 
+          filter(totalKeyPresses > 10) %>%
+          select(!c(sessionNumber, hour, sessionTimestampLocal, date, active, upright)),
+        progress = FALSE) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+dev.off()
 ```
 
 
 # Self-report data
 
 ```{r}
-dat_rep <- read.csv("../CLEAR3_Biaffect_Leow/Archived Versions/2022-02-15 - Updated Daily Dataset for Elena and Alex/20220215_clear3daily.csv")
+rep_file <- "../CLEAR3_Biaffect_Leow/Archived Versions/2022-02-15 - Updated Daily Dataset for Elena and Alex/20220215_clear3daily.csv"
+dat_rep <- read.csv(rep_file)
 head(dat_rep)
 ```
 
@@ -454,6 +521,8 @@ dat_rep
 Join with the KL divergence data:
 
 ```{r}
+kl_div <- select(hists, year, month, week, entropy, KL_divergence)
+
 dat_rep <- dat_rep %>%
   mutate(
     year = year(daterated), 
@@ -496,7 +565,7 @@ ggplot(dat_rep %>%
 Anything that can predict divergence? Time for a SPLOM (scatter plot matrix).
 
 ```{r fig.height=8}
-ggpairs(dat_rep %>% select(
+h <- ggpairs(dat_rep %>% select(
   menstrualbleeding, 
   numdrinks_yest, 
   workday, 
@@ -505,13 +574,76 @@ ggpairs(dat_rep %>% select(
   wishsleep, 
   MJuse, 
   irritability_mean,
-  KL_divergence))
+  entropy,
+  KL_divergence),
+  progress = FALSE) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+save_and_plot(h, "images/splom_self_rep.png", res = 120)
+```
+
+# Merging self-rep and typing data, in some way
+
+```{r}
+dat_ses_day <- dat_ses %>%
+  filter(totalKeyPresses > 10) %>%
+  group_by(date) %>%
+  summarise(
+    medianIKD = mean(medianIKD),
+    percent95IKD = mean(percent95IKD),
+    madIKD = mean(madIKD),
+    autocorrectRate = mean(autocorrectRate),
+    backspaceRate = mean(backspaceRate),
+    active = mean(active),
+    upright = mean(upright),
+    entropy = entropy[1],
+    KL_divergence = KL_divergence[1]
+  )
+  
 ```
 
 ```{r}
-ggplot(dat_rep, aes(x = wishsleep, y = irritability_mean)) +
-  geom_bin_2d()
+dat_rep_tmp <- read.csv(rep_file) %>%
+  filter(id == dat_kp$userID[1]) %>%
+  mutate(
+    daterated = as.Date(daterated, format = "%m/%d/%Y"),
+    menstrualbleeding = as.factor(menstrualbleeding),
+    workday = as.factor(workday),
+    physicaltension = as.factor(physicaltension),
+    wishsleep = as.factor(wishsleep),
+    MJuse = as.factor(MJuse),
+  )
+
+dat_rep_tmp
 ```
 
+```{r}
+dat_ses_rep <- dat_ses_day %>%
+  inner_join(dat_rep_tmp, by = c("date" = "daterated"))
+
+dat_ses_rep
+```
+
+```{r fig.height=10, fig.width=20}
+ggpairs(dat_ses_rep %>%
+    select(
+      medianIKD,
+      upright,
+      menstrualbleeding, 
+      numdrinks_yest, 
+      workday, 
+      sleepdur_yest, 
+      physicaltension, 
+      wishsleep, 
+      MJuse, 
+      irritability_mean,
+      entropy,
+      KL_divergence
+    ),
+  progress = FALSE) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+# ggsave("images/splom_ses_rep.png", width = 1920, height = 1080, dpi = 100, units = "px")
+```
 
 
