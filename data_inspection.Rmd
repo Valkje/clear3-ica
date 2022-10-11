@@ -32,9 +32,6 @@ table(dat$keypress_type)
 table(dat$sessionTimeZone)
 ```
 
-
-
-
 ```{r}
 hist(dat$sampleNumber)
 ```
@@ -73,7 +70,6 @@ dat %>%
   })
 ```
 
-
 ```{r}
 dat
 ```
@@ -84,7 +80,16 @@ dat
 kp_path <- "data/User_3009_keypressDataMetrics.csv"
 acc_path <- "data/User_3009_accelData.csv"
 
-dats <- preproc(kp_path, acc_path, verbose = TRUE)
+raw_kp <- read.csv(kp_path)
+raw_acc <- read.csv(acc_path)
+```
+
+
+```{r}
+# Preprocess accelerometer data
+dat_acc <- preproc_acc(raw_acc, verbose = TRUE)
+
+dats <- preproc_kp(raw_kp, dat_acc, verbose = TRUE)
 dat_kp <- dats$dat_kp
 dat_ses <- dats$dat_ses
 ```
@@ -233,7 +238,7 @@ hists
 ```
 
 ```{r, fig.height=8}
-png("images/entropy.png", width = 1650, height = 1200, res = 200)
+# png("images/entropy.png", width = 1650, height = 1200, res = 200)
 
 par(mfrow = c(2, 1), mai = c(1, 1, 0.1, 0.1))
 with(hists, {
@@ -243,7 +248,7 @@ with(hists, {
   grid(NULL, NULL)
 })
 
-dev.off()
+# dev.off()
 ```
 
 
@@ -305,19 +310,6 @@ dat_rep <- read.csv(rep_file)
 head(dat_rep)
 ```
 
-Write table of every column:
-
-```{r}
-fname <- "rep_var_tables.txt"
-file.create(fname)
-
-for (col in colnames(dat_rep)) {
-  write(paste("#######################", col, "#######################\n"), file = fname, append = TRUE)
-  
-  write.table(table(dat_rep[[col]]), file = fname, append = TRUE)
-}
-```
-
 For now, only look at the self-report data of our subject of the key press data.
 
 ```{r}
@@ -327,6 +319,13 @@ dat_rep <- dat_rep %>%
 
 dat_rep
 ```
+
+Investigate source of entropy spike
+
+```{r}
+CONTINUE HERE
+```
+
 
 Join with the KL divergence data:
 

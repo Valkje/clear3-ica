@@ -2,12 +2,10 @@ library(gsignal)
 library(dplyr)
 
 # Preprocess the accelerometer data
-preproc_acc <- function(path, verbose = FALSE) {
-  if (verbose) print("Reading accelerometer data...")
+preproc_acc <- function(raw_acc, verbose = FALSE) {
+  if (verbose) print("Converting dates and times to objects...")
   
-  dat_acc <- read.csv(path)
-  
-  dat_acc <- dat_acc %>%
+  dat_acc <- raw_acc %>%
     mutate(
       date = as.Date(date, format = "%Y-%m-%d"),
       sessionTimestampLocal = as.POSIXct(sessionTimestampLocal, 
@@ -49,9 +47,8 @@ preproc_acc <- function(path, verbose = FALSE) {
 }
 
 # Preprocess the key press and accelerometer data, combine them
-preproc <- function(kp_path, acc_path, verbose = FALSE) {
-  # Read and preprocess accelerometer data
-  dat_acc <- preproc_acc(acc_path, verbose)
+preproc_kp <- function(raw_kp, dat_acc, verbose = FALSE) {
+  if (verbose) print("Aggregating accelerometer data...")
   
   # Aggregate accelerometer data over sessions
   dat_acc_ses <- dat_acc %>%
@@ -62,10 +59,9 @@ preproc <- function(kp_path, acc_path, verbose = FALSE) {
       bed = bed[1]
     )
   
-  if (verbose) print("Reading key press data...")
-  dat_kp <- read.csv(kp_path)
+  if (verbose) print("Converting key press dates and times to objects...")
   
-  dat_kp <- dat_kp %>%
+  dat_kp <- raw_kp %>%
     mutate(
       date = as.Date(date, format = "%Y-%m-%d"),
       keypressTimestampLocal = as.POSIXct(keypressTimestampLocal, 
@@ -75,6 +71,7 @@ preproc <- function(kp_path, acc_path, verbose = FALSE) {
     )
   
   if (verbose) print("Aggregating key press data...")
+  
   # Aggregate over sessions, join with accelerometer data
   dat_ses <- dat_kp %>%
     group_by(sessionNumber) %>%
