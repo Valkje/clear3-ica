@@ -204,7 +204,7 @@ histQ <- ggplot_build(
 hists <- dat_kp_alphanum %>%
   group_by(
     year = year(sessionTimestampLocal), 
-    month = month(sessionTimestampLocal), 
+    # month = month(sessionTimestampLocal), 
     week = week(sessionTimestampLocal)
   ) %>%
   nest() %>%
@@ -251,42 +251,39 @@ with(hists, {
 # dev.off()
 ```
 
-
 ```{r}
-dat_kp_kl <- hists %>%
-  unnest(cols = data) %>% 
-  group_by(sessionNumber) %>%
-  summarize(
-    entropy = entropy[1],
-    KL_divergence = KL_divergence[1]
-  )
+dat_kl <- dat_ses %>% 
+  filter(totalKeyPresses > 10) %>%
+  group_by(
+    year = year(sessionTimestampLocal), 
+    # month = month(sessionTimestampLocal), 
+    week = week(sessionTimestampLocal)
+  ) %>%
+  summarise(
+    medianIKD = mean(medianIKD),
+    percent95IKD = mean(percent95IKD),
+    madIKD = mean(madIKD),
+    autocorrectRate = mean(autocorrectRate),
+    backspaceRate = mean(backspaceRate),
+    active = mean(active),
+    upright = mean(upright)
+  ) %>%
+  ungroup() %>%
+  left_join(hists %>%
+              filter(nrow(data[[1]]) > 2000) %>%
+              select(year, week, entropy, KL_divergence),
+            by = c("year", "week")) 
 
-dat_ses <- dat_ses %>%
-  inner_join(dat_kp_kl, by = "sessionNumber")
-
-dat_ses
+head(dat_kl)
 ```
 
+
 ```{r fig.height=9}
-ggpairs(dat_ses %>% 
-          filter(totalKeyPresses > 10) %>%
-          group_by(date) %>%
-          summarise(
-            medianIKD = mean(medianIKD),
-            percent95IKD = mean(percent95IKD),
-            madIKD = mean(madIKD),
-            autocorrectRate = mean(autocorrectRate),
-            backspaceRate = mean(backspaceRate),
-            active = mean(active),
-            upright = mean(upright),
-            entropy = entropy[1],
-            KL_divergence = KL_divergence[1]
-          ) %>%
-          select(!c(date)),
+ggpairs(dat_kl %>% select(!c(year, week)), 
         progress = FALSE) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 
-ggsave("images/splom.png", width = 1920, height = 1080, dpi = 120, unit = "px")
+# ggsave("images/splom.png", width = 1920, height = 1080, dpi = 120, unit = "px")
 ```
 
 ```{r}
@@ -320,36 +317,27 @@ dat_rep <- dat_rep %>%
 dat_rep
 ```
 
-Investigate source of entropy spike
+Join with the key press session and entropy data:
 
 ```{r}
-CONTINUE HERE
-```
-
-
-Join with the KL divergence data:
-
-```{r}
-kl_div <- select(hists, year, month, week, entropy, KL_divergence)
-
-dat_rep <- dat_rep %>%
-  mutate(
-    year = year(daterated), 
-    month = month(daterated), 
+dat_rep_kl <- dat_rep %>%
+  group_by(
+    year = year(daterated),
     week = week(daterated)
   ) %>%
-  left_join(kl_div, by = c("year", "month", "week"))
-
-dat_rep
+  summarize(
+    menstrualbleeding = mean(menstrualbleeding, na.rm = T),
+    numdrinks_yest = mean(numdrinks_yest, na.rm = T),
+    workday = mean(workday, na.rm = T),
+    sleepdur_yest = mean(sleepdur_yest, na.rm = T),
+    physicaltension = mean(physicaltension, na.rm = T),
+    wishsleep = mean(wishsleep, na.rm = T),
+    MJuse = mean(MJuse, na.rm = T),
+    irritability_mean = mean(irritability_mean, na.rm = T)
+  ) %>%
+  left_join(dat_kl, by = c("year", "week")) %>%
+  ungroup()
 ```
-
-
-```{r}
-ggplot(dat_rep, aes(x = daterated)) +
-  geom_line(aes(y = KL_divergence), size = 1.05) +
-  scale_x_date(labels = date_format("%Y-%m"), limits = c(min(dat_rep$daterated), as.Date("2021-07-11")))
-```
-
 
 ```{r fig.height=8}
 ggplot(dat_rep, aes(x = daterated)) + 
@@ -373,86 +361,27 @@ ggplot(dat_rep %>%
 
 Anything that can predict divergence? Time for a SPLOM (scatter plot matrix).
 
-```{r fig.height=8}
-h <- ggpairs(dat_rep %>% select(
-  menstrualbleeding, 
-  numdrinks_yest, 
-  workday, 
-  sleepdur_yest, 
-  physicaltension, 
-  wishsleep, 
-  MJuse, 
-  irritability_mean,
-  entropy,
-  KL_divergence),
+```{r fig.height=10, warning=FALSE}
+# menstrualbleeding, 
+# numdrinks_yest, 
+# workday, 
+# sleepdur_yest, 
+# physicaltension, 
+# wishsleep, 
+# MJuse, 
+# irritability_mean,
+# entropy,
+# KL_divergence
+
+
+ggpairs(dat_rep_kl %>% 
+          select(!c(year, week)),
   progress = FALSE) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 
-save_and_plot(h, "images/splom_self_rep.png", res = 120)
+# save_and_plot(h, "images/splom_self_rep.png", res = 120)
 ```
 
-# Merging self-rep and typing data, in some way
 
-```{r}
-dat_ses_day <- dat_ses %>%
-  filter(totalKeyPresses > 10) %>%
-  group_by(date) %>%
-  summarise(
-    medianIKD = mean(medianIKD),
-    percent95IKD = mean(percent95IKD),
-    madIKD = mean(madIKD),
-    autocorrectRate = mean(autocorrectRate),
-    backspaceRate = mean(backspaceRate),
-    active = mean(active),
-    upright = mean(upright),
-    entropy = entropy[1],
-    KL_divergence = KL_divergence[1]
-  )
-  
-```
-
-```{r}
-dat_rep_tmp <- read.csv(rep_file) %>%
-  filter(id == dat_kp$userID[1]) %>%
-  mutate(
-    daterated = as.Date(daterated, format = "%m/%d/%Y"),
-    menstrualbleeding = as.factor(menstrualbleeding),
-    workday = as.factor(workday),
-    physicaltension = as.factor(physicaltension),
-    wishsleep = as.factor(wishsleep),
-    MJuse = as.factor(MJuse),
-  )
-
-dat_rep_tmp
-```
-
-```{r}
-dat_ses_rep <- dat_ses_day %>%
-  inner_join(dat_rep_tmp, by = c("date" = "daterated"))
-
-dat_ses_rep
-```
-
-```{r fig.height=10, fig.width=20}
-ggpairs(dat_ses_rep %>%
-    select(
-      medianIKD,
-      upright,
-      menstrualbleeding, 
-      numdrinks_yest, 
-      workday, 
-      sleepdur_yest, 
-      physicaltension, 
-      wishsleep, 
-      MJuse, 
-      irritability_mean,
-      entropy,
-      KL_divergence
-    ),
-  progress = FALSE) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-
-# ggsave("images/splom_ses_rep.png", width = 1920, height = 1080, dpi = 100, units = "px")
-```
 
 
