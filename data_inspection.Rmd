@@ -9,6 +9,7 @@ library(tidyverse)
 library(GGally)
 library(scales)
 library(lubridate)
+library(ash)
 
 filter <- dplyr::filter
 
@@ -76,22 +77,109 @@ dat
 
 # Perimenstrual suicidality data
 
-```{r}
-kp_path <- "data/User_3009_keypressDataMetrics.csv"
-acc_path <- "data/User_3009_accelData.csv"
+Load all subjects key press data into one big data frame:
 
-raw_kp <- read.csv(kp_path)
-raw_acc <- read.csv(acc_path)
+```{r}
+dat_dir <- "data"
+
+pattern <- "sub-([0-9]+)"
+subjects <- str_match(dir(dat_dir, pattern), pattern)[,2]
+
+dat_all_kp <- data.frame()
+
+for (sub in subjects) {
+  sub_dir <- file.path(dat_dir, str_glue("sub-{sub}"), "preproc")
+  
+  load(file.path(sub_dir, str_glue("sub-{sub}_preprocessed.rda")))
+  
+  if ("sessionDuration_minus6sec" %in% colnames(dat_kp)) {
+    dat_kp <- dat_kp %>%
+      select(!c(sessionDuration_minus6sec, session_duration))
+  } else {
+    dat_kp <- dat_kp %>%
+      select(!firstKP_timestamp)
+  }
+  
+  dat_all_kp <- rbind(dat_all_kp, dat_kp)
+}
+
+dat_all_kp
+```
+
+```{r}
+dat_all_kp %>%
+  group_by(phoneType, userID) %>%
+  summarize(
+    distPrevMin = min(distanceFromPrevious, na.rm = TRUE),
+    distPrevMax = max(distanceFromPrevious, na.rm = TRUE))
+```
+
+```{r}
+screen_specs
+```
+```{r}
+str_match("Unknown iPhone [iPhone12 X Plus]", "iPhone(\\s?\\w+(?:\\s\\w+)?(?:\\s\\w+)?)-?")
+```
+
+
+## Examining subject 3009
+
+```{r}
+sub_path <- "data/sub-3009/raw"
+
+raw_kp <- read.csv(file.path(sub_path, "User_3009_keypressDataMetrics.csv"))
+raw_acc <- read.csv(file.path(sub_path, "User_3009_accelData.csv"))
+```
+
+```{r}
+screen_specs %>% filter(phoneType == "iPhone 12 ")
 ```
 
 
 ```{r}
-# Preprocess accelerometer data
+screen_specs <- read.delim("data/iPhone_screen_specs.tsv", strip.white = TRUE)
+  
+points_to_cm <- function(dist, phoneType) {
+  if (is.na(dist) || is.na(phoneType)) {
+    return(NA)
+  }
+  
+  pType <- str_match(phoneType, "iPhone(\\s?\\w+(?:\\s\\w+)?(?:\\s\\w+)?)-?")[,2]
+  pType <- paste("iPhone", pType)
+  
+  spec <- screen_specs %>% filter(phoneType == pType)
+  
+  # Multiply with scale factor to get physical pixels, divide by ppi to
+  # get inches, convert to centimeters by multiplying with 2.54
+  return(dist * spec$scaleFactor / spec$PPI * 2.54)
+}
+
+raw_kp %>%
+  mutate(
+    distanceFromPrevious = map2_dbl(distanceFromPrevious, phoneType, points_to_cm),
+    # distanceFromCenter = map_dbl(distanceFromCenter, points_to_cm, phoneType)
+  )
+
+str(list(c(1, 2), c(3, 4)))
+```
+
+
+```{r}
 dat_acc <- preproc_acc(raw_acc, verbose = TRUE)
 
 dats <- preproc_kp(raw_kp, dat_acc, verbose = TRUE)
 dat_kp <- dats$dat_kp
 dat_ses <- dats$dat_ses
+```
+
+
+```{r}
+load("data/sub-3009/preproc/sub-3009_preprocessed.rda")
+```
+
+```{r}
+dat_kp_alphanum <- dat_kp %>%
+    filter(keypress_type == "alphanum", previousKeyType == "alphanum")
 ```
 
 Aggregating per hour:
@@ -126,178 +214,13 @@ ggplot(dat_hour) +
   theme(text = element_text(size = 18), panel.border = element_blank())
 ```
 
-
-Interesting (but perhaps also expected) to see the effect of the number of key presses on the median vs mad distribution. Few key presses means low variability even at high median IKDs.
-
-```{r}
-with(dat_ses, {
-  plot(medianIKD, madIKD, main = "All sessions")
-})
-
-with(filter(dat_ses, totalKeyPresses > 10), {
-  plot(medianIKD, madIKD, main = "Sessions with >10 key presses")
-})
-```
-
-# Entropy
-
-```{r}
-dat_kp_alphanum <- dat_kp %>%
-  filter(keypress_type == "alphanum", previousKeyType == "alphanum")
-
-ggplot(dat_kp_alphanum) +
-  geom_point(aes(x = distanceFromPrevious, y = IKD), alpha = 0.2)
-```
-
-```{r}
-save_and_plot <- function(h, title, res = 200) {
-  png(title, width = 1920, height = 1080, res = res)
-  print(h)
-  dev.off()
-  
-  print(h)
-}
-```
-
-
-```{r fig.height=7}
-h <- ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
-  geom_bin_2d(bins = 100) +
-  labs(x = "distanceFromPrevious (iPhone 12 points)", y = "IKD (s)") +
-  scale_fill_continuous(type = "viridis")
-
-save_and_plot(h, "images/hist2d_overall.png")
-
-h <- ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
-  geom_bin_2d(bins = 100) +
-  scale_x_continuous(limits = c(0, 300)) +
-  scale_y_continuous(limits = c(0, 0.5)) +
-  scale_fill_continuous(type = "viridis")
-
-save_and_plot(h, "images/hist2d_overall_zoomed.png")
-```
-
-Extract the 2D histogram from the ggplot object. From that histogram, we will calculate breaks to be used in the construction of histograms of subsets of the data.
-
-```{r}
-h <- ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
-  geom_bin_2d(bins = 100)
-
-hist2d <- ggplot_build(h)$data[[1]]
-
-edges <- list(x = sort(unique(hist2d$xmin)), y = sort(unique(hist2d$ymin)))
-
-hist2d
-```
-
-Partition the data in time frames of a month, calculate the normalised 2D histograms, and then calculate the KL divergence from the first month.
-
-We denote the overall histogram as our model distribution $Q$, and all other, time-windowed histograms as our observation distributions $P$. (I would have liked to set $Q$ to the very first time-windowed histogram, but then we run into division by 0 problems, leading to infinite relative entropy.)
-
-Prepare for some next-level data wrangling.
-
-```{r}
-histQ <- ggplot_build(
-  ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
-    geom_bin_2d(breaks = edges))$data[[1]]
-
-hists <- dat_kp_alphanum %>%
-  group_by(
-    year = year(sessionTimestampLocal), 
-    # month = month(sessionTimestampLocal), 
-    week = week(sessionTimestampLocal)
-  ) %>%
-  nest() %>%
-  mutate(
-    hist = map(data, function (df) {
-      h <- ggplot_build(
-        ggplot(df, aes(x = distanceFromPrevious, y = IKD)) +
-          geom_bin_2d(breaks = edges)
-      )
-      
-      # png(paste("images/hist2d_week_", cur_group_id(), ".png", sep = ""), 
-      #     width = 1920, height = 1080, res = 200)
-      # print(h)
-      # dev.off()
-      
-      h$data[[1]]
-    }),
-    entropy = map_dbl(hist, function(hist) {
-      sum(hist$density * log2(1 / hist$density))
-    }),
-    KL_divergence = map_dbl(hist, function(hist) {
-      joint <- hist %>%
-        full_join(histQ, by = c("xbin", "ybin"), suffix = c(".P", ".Q")) %>%
-        filter(!is.na(density.P))
-      
-      sum(joint$density.P * log2(joint$density.P / joint$density.Q))
-    })
-  )
-
-hists
-```
-
-```{r, fig.height=8}
-# png("images/entropy.png", width = 1650, height = 1200, res = 200)
-
-par(mfrow = c(2, 1), mai = c(1, 1, 0.1, 0.1))
-with(hists, {
-  plot(week, entropy, type = "b", col = "steelblue", lwd = 2)
-  grid(NULL, NULL)
-  plot(week, KL_divergence, type = "b", col = "darkred", lwd = 2)
-  grid(NULL, NULL)
-})
-
-# dev.off()
-```
-
-```{r}
-dat_kl <- dat_ses %>% 
-  filter(totalKeyPresses > 10) %>%
-  group_by(
-    year = year(sessionTimestampLocal), 
-    # month = month(sessionTimestampLocal), 
-    week = week(sessionTimestampLocal)
-  ) %>%
-  summarise(
-    medianIKD = mean(medianIKD),
-    percent95IKD = mean(percent95IKD),
-    madIKD = mean(madIKD),
-    autocorrectRate = mean(autocorrectRate),
-    backspaceRate = mean(backspaceRate),
-    active = mean(active),
-    upright = mean(upright)
-  ) %>%
-  ungroup() %>%
-  left_join(hists %>%
-              filter(nrow(data[[1]]) > 2000) %>%
-              select(year, week, entropy, KL_divergence),
-            by = c("year", "week")) 
-
-head(dat_kl)
-```
-
-
 ```{r fig.height=9}
-ggpairs(dat_kl %>% select(!c(year, week)), 
+ggpairs(dat_ent %>% select(!c(year, week)), 
         progress = FALSE) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 
 # ggsave("images/splom.png", width = 1920, height = 1080, dpi = 120, unit = "px")
 ```
-
-```{r}
-png("images/splom.png", width = 1920, height = 1080, res = 120)
-
-ggpairs(dat_ses %>% 
-          filter(totalKeyPresses > 10) %>%
-          select(!c(sessionNumber, hour, sessionTimestampLocal, date, active, upright)),
-        progress = FALSE) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-
-dev.off()
-```
-
 
 # Self-report data
 
@@ -320,7 +243,7 @@ dat_rep
 Join with the key press session and entropy data:
 
 ```{r}
-dat_rep_kl <- dat_rep %>%
+dat_rep_ent <- dat_rep %>%
   group_by(
     year = year(daterated),
     week = week(daterated)
@@ -335,7 +258,7 @@ dat_rep_kl <- dat_rep %>%
     MJuse = mean(MJuse, na.rm = T),
     irritability_mean = mean(irritability_mean, na.rm = T)
   ) %>%
-  left_join(dat_kl, by = c("year", "week")) %>%
+  left_join(dat_ent, by = c("year", "week")) %>%
   ungroup()
 ```
 
@@ -374,7 +297,7 @@ Anything that can predict divergence? Time for a SPLOM (scatter plot matrix).
 # KL_divergence
 
 
-ggpairs(dat_rep_kl %>% 
+ggpairs(dat_rep_ent %>% 
           select(!c(year, week)),
   progress = FALSE) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
@@ -382,6 +305,55 @@ ggpairs(dat_rep_kl %>%
 # save_and_plot(h, "images/splom_self_rep.png", res = 120)
 ```
 
+# Visualise for all subjects
 
+```{r warning=FALSE, fig.height=10}
+rep_file <- "../CLEAR3_Biaffect_Leow/Archived Versions/2022-02-15 - Updated Daily Dataset for Elena and Alex/20220215_clear3daily.csv"
+dat_rep_all <- read.csv(rep_file)
 
+dat_dir <- "data"
+
+pattern <- "sub-([0-9]+)"
+subjects <- str_match(dir(dat_dir, pattern), pattern)[,2]
+
+for (sub in subjects) {
+  sub_dir <- file.path(dat_dir, str_glue("sub-{sub}"), "preproc")
+  
+  load(file.path(sub_dir, str_glue("sub-{sub}_preprocessed.rda")))
+  
+  dat_rep <- dat_rep_all %>%
+    filter(id == dat_kp$userID[1]) %>%
+    mutate(daterated = as.Date(daterated, format = "%m/%d/%Y"))
+  
+  dat_rep_ent <- dat_rep %>%
+    group_by(
+      year = year(daterated),
+      week = week(daterated)
+    ) %>%
+    summarize(
+      menstrualbleeding = mean(menstrualbleeding, na.rm = T),
+      numdrinks_yest = mean(numdrinks_yest, na.rm = T),
+      workday = mean(workday, na.rm = T),
+      sleepdur_yest = mean(sleepdur_yest, na.rm = T),
+      physicaltension = mean(physicaltension, na.rm = T),
+      wishsleep = mean(wishsleep, na.rm = T),
+      MJuse = mean(MJuse, na.rm = T),
+      irritability_mean = mean(irritability_mean, na.rm = T)
+    ) %>%
+    left_join(dat_ent, by = c("year", "week")) %>%
+    ungroup()
+  
+  h <- ggpairs(dat_rep_ent %>% 
+            select(!c(year, week)),
+    progress = FALSE) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  
+  ggsave(file.path(dat_dir, str_glue("sub-{sub}_splom.png")), 
+         plot = h,
+         width = 1920,
+         height = 1080,
+         units = "px",
+         dpi = 100)
+}
+```
 
