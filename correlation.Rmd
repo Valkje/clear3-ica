@@ -4,15 +4,9 @@ output: html_notebook
 ---
 
 ```{r setup}
-library(gsignal)
-library(reshape)
-library(tidyverse)
-library(GGally)
-library(scales)
-library(lubridate)
-library(ash)
-
 setwd("M:/Documents/Autocorrelation")
+
+source("src/load_dependencies.R")
 ```
 
 ```{r}

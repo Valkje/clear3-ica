@@ -4,18 +4,9 @@ output: html_notebook
 ---
 
 ```{r setup}
-library(gsignal)
-library(tidyverse)
-library(GGally)
-library(scales)
-library(lubridate)
-library(ash)
-
-filter <- dplyr::filter
-
 setwd("M:/Documents/Autocorrelation")
 
-source("src/preproc.R")
+source("src/load_dependencies.R")
 ```
 
 # Alex's data

@@ -125,7 +125,7 @@ List bin2d(NumericVector x, NumericVector y, int xBins, int yBins = -1) {
 // run after the compilation.
 //
 
-/*** R
+/** R 
 library(reshape)
 library(tidyverse)
 
