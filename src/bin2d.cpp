@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdexcpt.h>
+#include <float.h>
 #include <algorithm>
 #include <Rcpp.h>
 using namespace Rcpp;
@@ -53,6 +54,9 @@ IntegerMatrix binCounts(
   
   uint_fast32_t xBin, yBin;
   for (uint_fast32_t i = 0; i < x.length(); i++) {
+    if (NumericVector::is_na(x[i]) || NumericVector::is_na(y[i]))
+      continue;
+    
     xBin = getBin(x[i], xBreaks);
     yBin = getBin(y[i], yBreaks);
     counts(xBin, yBin) += 1;
@@ -61,9 +65,35 @@ IntegerMatrix binCounts(
   return counts;
 }
 
+double minNa(const NumericVector& vec) {
+  double minimum = DBL_MAX;
+  for (double x : vec) {
+    if (NumericVector::is_na(x))
+      continue;
+    
+    if (x < minimum)
+      minimum = x;
+  }
+  
+  return minimum;
+}
+
+double maxNa(const NumericVector& vec) {
+  double maximum = DBL_MIN;
+  for (double x : vec) {
+    if (NumericVector::is_na(x))
+      continue;
+    
+    if (x > maximum)
+      maximum = x;
+  }
+  
+  return maximum;
+}
+
 NumericVector calcBreaks(const NumericVector& dat, const uint_fast32_t& nBins) {
-  double minimum = min(dat);
-  double maximum = max(dat);
+  double minimum = minNa(dat);
+  double maximum = maxNa(dat);
   
   double diff = maximum - minimum;
   
@@ -74,9 +104,9 @@ NumericVector calcBreaks(const NumericVector& dat, const uint_fast32_t& nBins) {
   // Recalculate difference to take the padding into account
   diff = maximum - minimum;
   
-  NumericVector breaks(nBins);
-  for (uint_fast32_t i = 0; i < nBins; i++) {
-    breaks(i) = minimum + diff / (nBins - 1) * i;
+  NumericVector breaks(nBins + 1);
+  for (uint_fast32_t i = 0; i < nBins + 1; i++) {
+    breaks(i) = minimum + diff / nBins * i;
   }
   
   return breaks;

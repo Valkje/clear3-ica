@@ -1,0 +1,346 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+setwd("M:/Documents/Autocorrelation")
+
+source("src/load_dependencies.R")
+```
+
+```{r}
+dat_dir <- "data"
+
+dirs <- list.dirs(dat_dir)
+
+pattern <- "sub-([0-9]+)/preproc$"
+preproc_paths <- str_subset(dirs, pattern)
+subjects <- str_match(preproc_paths, pattern)[,2]
+```
+
+```{r}
+dists <- vector(mode = "list", length(subjects))
+ikds <- vector(mode = "list", length(subjects))
+
+for (i in 1:length(subjects)) {
+  sub <- subjects[i]
+  print(str_glue("Working on subject {sub}"))
+  
+  preproc_path <- str_subset(preproc_paths, str_glue("sub-{sub}"))
+  preproc_file <- file.path(preproc_path, str_glue("sub-{sub}_preprocessed.rda"))
+  load(preproc_file)
+  
+  dat_kp_alphanum <- dat_kp %>%
+    filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+  
+  dists[[i]] <- dat_kp_alphanum$distanceFromPrevious
+  ikds[[i]] <- dat_kp_alphanum$IKD
+}
+```
+
+Get breaks that will cover the entire range of data:
+
+```{r}
+ls <- bin2d(unlist(dists), unlist(ikds), xBins = 100, yBins = 100)
+xBreaks <- ls$xBreaks
+yBreaks <- ls$yBreaks
+```
+
+
+```{r fig.height=10}
+df <- ls[[1]]
+df <- rownames_to_column(df, "x")
+df <- melt(df, id.vars = "x", variable_name = "y")
+df$x <- factor(df$x)
+
+ggplot(df) +
+  geom_raster(aes(x, y, fill = log(value))) +
+  theme(text = element_text(size=12),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+mat <- binCounts(dat_kp_alphanum$distanceFromPrevious, dat_kp_alphanum$IKD, xBreaks, yBreaks)
+ggplot(melt(mat)) +
+  geom_raster(aes(X1, X2, fill = log(value))) +
+  theme(text = element_text(size=12),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+# Between-subjects fingerprinting
+
+```{r}
+predict <- function(xHists, yHists) {
+  y_pred <- vector(mode = "integer", length(xHists))
+  
+  for (i in 1:length(xHists)) {
+    # Flatten histogram that should be tested
+    x <- as.vector(xHists[[i]])
+    
+    # Try to find the correct match in yHists
+    rs <- map(yHists, function(hist) {
+      cor(x, as.vector(hist))
+    })
+    
+    y_pred[i] <- which.max(rs)
+  }
+  
+  y_pred
+}
+```
+
+```{r}
+split_prop <- 0.1
+
+hists1 <- map2(dists, ikds, function(dists, ikds) {
+  split_idx <- as.integer(split_prop * length(dists))
+  binCounts(dists[1:split_idx], ikds[1:split_idx], xBreaks, yBreaks)
+})
+
+hists2 <- map2(dists, ikds, function(dists, ikds) {
+  len <- length(dists)
+  split_idx <- as.integer(split_prop * len)
+  binCounts(dists[(split_idx+1):len], ikds[(split_idx+1):len], xBreaks, yBreaks)
+})
+```
+
+Calculate individual identification accuracy:
+
+```{r}
+y <- 1:length(hists1)
+y_pred <- predict(hists1, hists2)
+
+mean(y_pred == y)
+```
+
+```{r}
+split_props <- seq(0.001, 0.999, by = 0.001)
+# We will compare part 1 vs part 2 and vice versa, so we need a vector of a 
+# length that is twice the number of splits
+n_splits <- 2 * length(split_props)
+iids <- vector(mode = "numeric", n_splits)
+
+y <- 1:length(dists)
+# Holds all the predicted labels
+n_subjects <- length(dists)
+y_preds <- vector(mode = "integer", n_splits * n_subjects)
+y_preds <- -1 # for testing
+
+pb <- txtProgressBar(0, length(split_props), style = 3)
+
+for (i in 1:length(split_props)) {
+  setTxtProgressBar(pb, i)
+  
+  split_prop <- split_props[i]
+  
+  # Calculate histogram of first part
+  hists1 <- map2(dists, ikds, function(dists, ikds) {
+    split_idx <- as.integer(split_prop * length(dists))
+    binCounts(dists[1:split_idx], ikds[1:split_idx], xBreaks, yBreaks)
+  })
+  
+  # Calculate histogram of second part
+  hists2 <- map2(dists, ikds, function(dists, ikds) {
+    len <- length(dists)
+    split_idx <- as.integer(split_prop * len)
+    binCounts(dists[(split_idx+1):len], ikds[(split_idx+1):len], xBreaks, yBreaks)
+  })
+  
+  y_pred <- predict(hists1, hists2)
+  y_preds[(2 * n_subjects * (i - 1) + 1):(2 * n_subjects * i - n_subjects)] <- y_pred
+  iids[2*i - 1] <- mean(y_pred == y)
+  
+  y_pred <- predict(hists2, hists1)
+  y_preds[(2 * n_subjects * i - n_subjects + 1):(2 * n_subjects * i)] <- y_pred
+  iids[2*i] <- mean(y_pred == y)
+}
+
+close(pb)
+
+mean(iids)
+```
+
+```{r}
+accs <- y_preds == rep(y, n_splits)
+accs_mat <- matrix(accs, ncol = n_subjects, byrow = TRUE)
+colMeans(accs_mat)
+```
+
+# Within-subjects fingerprinting
+
+```{r}
+load("data/sub-3009/preproc/sub-3009_preprocessed.rda")
+```
+
+
+```{r}
+dat_kp_alphanum <- dat_kp %>%
+    filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+
+calcCor <- function(hist, lagged_hist) {
+  if (is.null(lagged_hist))
+    return(NA)
+  
+  cor(as.vector(hist), as.vector(lagged_hist))
+}
+
+dat_day <- dat_kp_alphanum %>%
+  group_by(
+    year = year(sessionTimestampLocal),
+    month = month(sessionTimestampLocal),
+    day = day(sessionTimestampLocal)
+  ) %>%
+  nest() %>%
+  mutate(
+    date = ymd(paste(year, month, day, sep = "-")),
+    numberOfKeyPresses = nrow(data[[1]]),
+    hist = map(data, function(df) {
+      binCounts(df$distanceFromPrevious, df$IKD, xBreaks, yBreaks)
+    })
+  ) %>%
+  ungroup() %>%
+  mutate(
+    cor = map2_dbl(hist, lag(hist), calcCor)
+  )
+
+dat_day
+```
+
+```{r}
+for (i in 1:10) {
+  hist <- dat_day[i,]$hist
+  
+  g <- ggplot(melt(hist)) +
+    geom_raster(aes(X1, X2, fill = log(value))) +
+    theme(text = element_text(size=12),
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  
+  print(g)
+}
+```
+
+```{r}
+with(dat_day, {
+  plot(numberOfKeyPresses, cor)
+})
+```
+
+```{r fig.height=8}
+ggplot(dat_day, aes(date, cor)) +
+  geom_point() +
+  geom_line(group = 1) +
+  ylim(0, 1) +
+  theme(text = element_text(size=12),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+rep_file <- "../CLEAR3_Biaffect_Leow/Archived Versions/2022-02-15 - Updated Daily Dataset for Elena and Alex/20220215_clear3daily.csv"
+dat_rep <- read.csv(rep_file) %>%
+  filter(id == dat_kp$userID[1]) %>%
+  mutate(daterated = as.Date(daterated, format = "%m/%d/%Y"))
+dat_rep
+```
+
+```{r}
+# Replace NAs in partially complete cases
+repl_part_comp <- function(col, value, ...) {
+  other_cols <- list(...)
+  
+  case_when(
+    is.na(col) & !all(sapply(other_cols, is.na)) ~ value,
+    TRUE ~ col
+  )
+}
+
+dat_rep_cleaned <- dat_rep %>%
+  select(!c(id, posLHtoday, medchange_notes, medchange_notes_1_TEXT, 
+            usedPRN_1_TEXT, smokingTHCyn_2_1, vapeTHCyn_2_1, edibleTHCyn_2_1,
+            OtherTHCyn_2_1, CBDyn_2_1, recdrugs_yn_1_TEXT, Computer_date)) %>%
+  mutate(
+    mhpYN_0 = repl_part_comp(mhpYN_0, value = as.integer(0), mhpYN_1, mhpYN_2),
+    mhpYN_1 = repl_part_comp(mhpYN_1, value = as.integer(0), mhpYN_0, mhpYN_2),
+    mhpYN_2 = repl_part_comp(mhpYN_2, value = as.integer(0), mhpYN_0, mhpYN_1),
+    smokingTHCyn_1 = repl_part_comp(smokingTHCyn_1, as.integer(1), MJuse),
+    vapeTHCyn_1 = repl_part_comp(vapeTHCyn_1, as.integer(1), MJuse),
+    edibleTHCyn_1 = repl_part_comp(edibleTHCyn_1, as.integer(1), MJuse),
+    OtherTHCyn_1 = repl_part_comp(OtherTHCyn_1, as.integer(1), MJuse),
+    CBDyn_1 = repl_part_comp(CBDyn_1, as.integer(1), MJuse),
+    firstdayofperiod = replace_na(firstdayofperiod, 0), # Assumes NAs are not actually missing
+    workday = factor(workday)
+  )
+
+# Create replacement vector based on column names
+rep_names <- na.omit(str_extract(colnames(dat_rep_cleaned), "stress_[0-9]+"))
+rep_list <- as.list(setNames(rep(0, length(rep_names)), rep_names))
+dat_rep_cleaned <- dat_rep_cleaned %>% 
+  replace_na(rep_list)
+
+# Now trim down heavily on the number of columns, try to summarize where possible
+dat_rep_cleaned %>%
+  mutate(nStressors = sum(stress_1, stress_2, stress_3, stress_4, stress_5,
+                          stress_6, stress_7, stress_8, stress_9, stress_10,
+                          stress_11, stress_12, stress_13, stress_14, 
+                          stress_15)) %>%
+  select(menstrualbleeding, firstdayofperiod, numdrinks_yest, workday, 
+         sleepdur_yest, SleepLNQuality, physicalpain, physicaltension,) # Determine which variables you want to use
+
+dat_rep_cleaned
+```
+
+
+```{r}
+dat_rep_cor <- dat_day %>%
+  full_join(dat_rep, c("date" = "daterated"))
+
+dat_rep_cor
+```
+
+Last row for subject 3009 contains a date almost a year later. For now we will just exclude it.
+
+```{r}
+if (dat_kp$userID[1] == 3009)
+  dat_rep_cor <- dat_rep_cor[1:(nrow(dat_rep_cor)-1),]
+```
+
+```{r}
+dat_rep_cor <- dat_rep_cor %>%
+  mutate(
+    dPMDD_mean = c(NA, diff(PMDDemosx_mean)),
+    dIrritability_mean = c(NA, diff(irritability_mean)),
+    dSuicidality_mean = c(NA, diff(suicidality_mean)),
+    dPANAS_happy = c(NA, diff(PANAS_happy))
+  )
+```
+
+
+```{r fig.height=8}
+ggplot(dat_rep_cor, aes(cor, sleepdur_yest)) +
+  geom_point()
+
+ggplot(dat_rep_cor, aes(cor, numberOfKeyPresses)) +
+  geom_point()
+
+ggplot(dat_rep_cor, aes(cor, dPMDD_mean)) +
+  geom_point()
+
+ggplot(dat_rep_cor, aes(cor, dIrritability_mean)) +
+  geom_point()
+
+ggplot(dat_rep_cor, aes(cor, dSuicidality_mean)) +
+  geom_point()
+
+ggplot(dat_rep_cor, aes(cor, dPANAS_happy)) +
+  geom_point()
+```
+
+```{r}
+m1 <- lm(cor ~ dPMDD_mean + dIrritability_mean + dSuicidality_mean + numberOfKeyPresses, data = dat_rep_cor)
+summary(m1)
+```
+
+```{r}
+m2 <- lm(dPMDD_mean ~ cor, data = dat_rep_cor)
+summary(m2)
+```
+
+
