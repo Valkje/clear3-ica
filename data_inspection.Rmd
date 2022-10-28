@@ -68,6 +68,19 @@ dat
 
 # Perimenstrual suicidality data
 
+```{r}
+all_rep_dat <- read_sav("../CLEAR3_Biaffect_Leow/2022-08-01 - Daily Dataset/clear3daily_20220801.sav")
+all_rep_dat <- zap_labels(all_rep_dat)
+all_rep_dat
+```
+
+```{r}
+table(all_rep_dat$id)
+```
+
+
+## Combining all data
+
 Load all subjects key press data into one big data frame:
 
 ```{r}
@@ -108,6 +121,7 @@ dat_all_kp %>%
 ```{r}
 screen_specs
 ```
+
 ```{r}
 str_match("Unknown iPhone [iPhone12 X Plus]", "iPhone(\\s?\\w+(?:\\s\\w+)?(?:\\s\\w+)?)-?")
 ```
@@ -121,6 +135,101 @@ sub_path <- "data/sub-3009/raw"
 raw_kp <- read.csv(file.path(sub_path, "User_3009_keypressDataMetrics.csv"))
 raw_acc <- read.csv(file.path(sub_path, "User_3009_accelData.csv"))
 ```
+
+```{r}
+raw_kp
+```
+
+```{r}
+raw_acc
+```
+
+
+## Handling PSV files
+
+```{r}
+dat_dir <- "data"
+
+labels = c("distanceFromCenter", "distanceFromPrevious")
+
+path <- "../CLEAR/Clear lab participants keystroke dynamics data/***REMOVED*** keystroke dynamics data.psv"
+
+sub <- str_match(path, "\\+([0-9]+)")[,2]
+
+intendend_n_pipes <- 14
+
+lin <- read_lines(path)
+actual_n_pipes <- str_count(lin[1], "\\|")
+
+sel <- (length(labels) + 1 - (intendend_n_pipes - actual_n_pipes)):length(labels)
+new_labels <- paste(labels[sel], collapse = "|")
+
+if (new_labels != "") 
+  lin[1] <- paste(lin[1], new_labels, sep = "|")
+
+sub_dir <- str_glue("sub-{sub}")
+raw_dir <- file.path(dat_dir, sub_dir, "raw")
+dir.create(raw_dir, showWarnings = FALSE, recursive = TRUE)
+
+sub_kp_file <- file.path(raw_dir, str_glue("sub-{sub}_keystrokes.psv"))
+write_lines(lin, sub_kp_file)
+```
+
+```{r}
+raw_kp <- read.table(sub_kp_file, header = TRUE, sep = "|", strip.white = TRUE, fill = TRUE)
+raw_kp
+```
+
+Things to do for the key press data:
+
+* Convert sessionTimestamp to sessionTimestampLocal. (Note: sessionTimeZone says it's zero, but I don't believe that. Looking, for instance, at the frequency of key strokes over time, it is clear that all timestamps shoud be shifted by createdOnTimeZone instead of sessionTimeZone.)
+* Calculate IKD from timestamp.
+* Convert timestamp to keypressTimestampLocal.
+* Convert sampleNumber to sessionNumber.
+* Calculate previousKeyType.
+
+```{r}
+raw_kp %>%
+  mutate(
+    sessionTimestampLocal = as_datetime(sessionTimestamp + createdOnTimeZone * 36),
+    keypressTimestampLocal = as_datetime(timestamp + createdOnTimeZone * 36),
+    IKD = c(NA, diff(timestamp)),
+    previousKeyType = lag(keypress_type),
+    sessionNumber = cumsum(sampleNumber == 1)
+  ) %>%
+  select(!c(sessionTimestamp, sessionTimeZone, sampleNumber))
+```
+
+```{r}
+dt <- as_datetime(raw_kp$sessionTimestamp)
+
+hist((hour(dt) - 6) %% 24)
+```
+
+
+```{r}
+raw_acc <- read.table("../CLEAR/Clear lab participants keyboard accelerometer kinematics data/***REMOVED*** keyboard accelerometer kinematics data.psv", header = TRUE, sep = "|", strip.white = TRUE, fill = TRUE)
+raw_acc
+```
+
+Things to do for the accelerometer data:
+
+* Convert sessionTimestamp to sessionTimestampLocal. (Note: sessionTimeZone says it's zero, but I don't believe that. Looking, for instance, at the frequency of key strokes over time, it is clear that all timestamps shoud be shifted by createdOnTimeZone instead of sessionTimeZone.)
+* Convert sampleNumber to sessionNumber.
+* Rename [x,y,z]Coord to [x,y,z].
+
+```{r}
+raw_acc %>%
+  mutate(
+    sessionTimestampLocal = as_datetime(sessionTimestamp + createdOnTimeZone * 36),
+    sessionNumber = cumsum(sampleNumber == 1)
+  ) %>%
+  rename(x = xCoord, y = yCoord, z = zCoord) %>%
+  select(!c(sessionTimestamp, sessionTimeZone, sampleNumber))
+```
+
+
+## Normalizing distanceFromPrevious
 
 ```{r}
 screen_specs %>% filter(phoneType == "iPhone 12 ")
