@@ -10,10 +10,11 @@ preproc_acc <- function(raw_acc, verbose = FALSE) {
   
   dat_acc <- raw_acc %>%
     mutate(
-      date = as.Date(date, format = "%Y-%m-%d"),
-      sessionTimestampLocal = as.POSIXct(sessionTimestampLocal, 
-                                         format = "%Y-%m-%d %H:%M:%OS")
-    )
+      sessionTimestampLocal = as_datetime(sessionTimestamp + createdOnTimeZone * 36),
+      sessionNumber = cumsum(sampleNumber == 1)
+    ) %>%
+    rename(x = xCoord, y = yCoord, z = zCoord) %>%
+    select(!c(sessionTimestamp, sessionTimeZone, sampleNumber))
   
   if (verbose) print("Filtering...")
   
@@ -69,22 +70,28 @@ preproc_kp <- function(raw_kp, dat_acc, verbose = FALSE) {
   
   dat_kp <- raw_kp %>%
     mutate(
-      date = as.Date(date, format = "%Y-%m-%d"),
-      keypressTimestampLocal = as.POSIXct(keypressTimestampLocal, 
-                                          format = "%Y-%m-%d %H:%M:%OS"),
-      sessionTimestampLocal = as.POSIXct(keypressTimestampLocal, 
-                                         format = "%Y-%m-%d %H:%M:%OS"),
+      sessionTimestampLocal = as_datetime(sessionTimestamp + createdOnTimeZone * 36),
+      keypressTimestampLocal = as_datetime(timestamp + createdOnTimeZone * 36),
+      IKD = c(NA, diff(timestamp)),
+      previousKeyType = lag(keypress_type),
+      sessionNumber = cumsum(sampleNumber == 1),
       phoneType = paste(
         "iPhone",
-        str_match(phoneType, "iPhone\\s?(\\w+(?:\\s\\w+)?(?:\\s\\w+)?)-?")[,2])
-    )
+        str_replace(
+          str_match(
+            phoneInfo, 
+            "iPhone\\s?(\\w+(?:\\s\\w+|\\+)?(?:\\s\\w+)?)-?,?")[,2],
+          "\\+", " Plus"))
+    ) %>%
+    select(!c(sessionTimestamp, sessionTimeZone, sampleNumber))
   
   vprint("Converting screen point distance to centimeters...")
   
   screen_specs <- read.delim("data/iPhone_screen_specs.tsv", strip.white = TRUE)
   # This assumes that the subject has only used one phone during the study.
   # Having to check the phone type for every row slows down the code considerably.
-  spec <- screen_specs %>% filter(phoneType == dat_kp[1,]$phoneType)
+  spec <- screen_specs %>% 
+    filter(phoneType == dat_kp[1,]$phoneType)
   
   # points_to_cm <- function(dist) {
   #   if (is.na(dist) || is.na(pType)) {
