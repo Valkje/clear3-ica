@@ -11,35 +11,36 @@ library(tidyverse)
 library(GGally)
 
 setwd("M:/Documents/Autocorrelation")
+# setwd("~/Documents/Autocorrelation")
 
 source("src/preproc.R")
+
+filter <- dplyr::filter
 ```
 
 ```{r}
 dat_dir <- "data"
 
-files <- list.files(dat_dir, full.names = TRUE)
-kp_files <- str_subset(files, "keypressDataMetrics.csv$")
-acc_files <- str_subset(files, "accelData.csv$")
+dirs <- list.dirs(dat_dir)
 
-pattern <- "User_([0-9]+)_"
-subjects <- base::intersect(
-  str_match(kp_files, pattern)[,2],
-  str_match(acc_files, pattern)[,2]
-)
+pattern <- "sub-([0-9]+)/raw$"
+raw_paths <- str_subset(dirs, pattern)
+subjects <- str_match(raw_paths, pattern)[,2]
 ```
 
 ```{r}
 for (sub in subjects) {
   print(str_glue("Preprocessing subject {sub}"))
   
-  pattern <- str_glue("User_{sub}")
-  kp_path <- str_subset(kp_files, pattern)
-  acc_path <- str_subset(acc_files, pattern)
+  raw_path <- str_subset(raw_paths, str_glue("sub-{sub}"))
+  kp_path <- file.path(raw_path, str_glue("User_{sub}_keypressDataMetrics.csv"))
+  acc_path <- file.path(raw_path, str_glue("User_{sub}_accelData.csv"))
   
   print("Reading data...")
   raw_kp <- read.csv(kp_path)
   raw_acc <- read.csv(acc_path)
+  
+  break
   
   print("Preprocessing accelerometer and key press data...")
   dat_acc <- preproc_acc(raw_acc, verbose = TRUE)
@@ -49,76 +50,7 @@ for (sub in subjects) {
   dat_ses <- dats$dat_ses
   
   print("Calculating entropy measures...")
-  dat_kp_alphanum <- dat_kp %>%
-    filter(keypress_type == "alphanum", previousKeyType == "alphanum")
   
-  # Use ggplot to create 2D histograms
-  h <- ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
-    geom_bin_2d(bins = 100)
-  hist2d <- ggplot_build(h)$data[[1]]
-  # Get bin edges
-  edges <- list(x = sort(unique(hist2d$xmin)), y = sort(unique(hist2d$ymin)))
-  
-  # Partition the data in time frames of a month, calculate the normalised 2D 
-  # histograms, and then calculate the KL divergence from the first month.
-  # We denote the overall histogram as our model distribution $Q$, and all 
-  # other, time-windowed histograms as our observation distributions $P$.
-  
-  # Recalculate the overall histogram, because specifying the breaks instead of
-  # the bins yields slightly different histograms
-  histQ <- ggplot_build(
-    ggplot(dat_kp_alphanum, aes(x = distanceFromPrevious, y = IKD)) +
-      geom_bin_2d(breaks = edges))$data[[1]]
-  
-  hists <- dat_kp_alphanum %>%
-    group_by(
-      year = year(sessionTimestampLocal),
-      week = week(sessionTimestampLocal)
-    ) %>%
-    nest() %>%
-    mutate(
-      hist = map(data, function (df) {
-        h <- ggplot_build(
-          ggplot(df, aes(x = distanceFromPrevious, y = IKD)) +
-            geom_bin_2d(breaks = edges)
-        )
-        
-        h$data[[1]]
-      }),
-      entropy = map_dbl(hist, function(hist) {
-        sum(hist$density * log2(1 / hist$density))
-      }),
-      KL_divergence = map_dbl(hist, function(hist) {
-        joint <- hist %>%
-          full_join(histQ, by = c("xbin", "ybin"), suffix = c(".P", ".Q")) %>%
-          filter(!is.na(density.P))
-        
-        sum(joint$density.P * log2(joint$density.P / joint$density.Q))
-      })
-    )
-  
-  print("Merging entropy and key press data...")
-  dat_ent <- dat_ses %>% 
-    filter(totalKeyPresses > 10) %>%
-    group_by(
-      year = year(sessionTimestampLocal), 
-      # month = month(sessionTimestampLocal), 
-      week = week(sessionTimestampLocal)
-    ) %>%
-    summarise(
-      medianIKD = mean(medianIKD),
-      percent95IKD = mean(percent95IKD),
-      madIKD = mean(madIKD),
-      autocorrectRate = mean(autocorrectRate),
-      backspaceRate = mean(backspaceRate),
-      active = mean(active),
-      upright = mean(upright)
-    ) %>%
-    ungroup() %>%
-    left_join(hists %>%
-                filter(nrow(data[[1]]) > 2000) %>%
-                select(year, week, entropy, KL_divergence),
-              by = c("year", "week"))
   
   print(str_glue("Saving files for subject {sub}."))
   
@@ -127,7 +59,6 @@ for (sub in subjects) {
   
   out_file <- file.path(out_path, str_glue("sub-{sub}_preprocessed.rda"))
   save(dat_acc, dat_kp, dat_ses, dat_ent, file = out_file)
-  break
 }
 ```
 
