@@ -4,7 +4,23 @@ output: html_notebook
 ---
 
 ```{r setup}
-setwd("M:/Documents/Autocorrelation")
+wd <- ""
+
+if (.Platform$OS.type == "unix") {
+  # Cluster environment
+  wd <- "~/Documents/Autocorrelation"
+  # Base directory for the data set
+  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
+} else {
+  wd <- "M:/Documents/Autocorrelation"
+  # Base directory for the data set
+  dat_dir <- "data"
+}
+
+# For some reason this sets the pwd only for the current scope, which means it 
+# does not affect anything outside an if block if you set it there.
+# So that's why it's here instead of above.
+setwd(wd) 
 
 source("src/load_dependencies.R")
 ```
@@ -76,54 +92,6 @@ all_rep_dat
 
 ```{r}
 table(all_rep_dat$id)
-```
-
-
-## Combining all data
-
-Load all subjects key press data into one big data frame:
-
-```{r}
-dat_dir <- "data"
-
-pattern <- "sub-([0-9]+)"
-subjects <- str_match(dir(dat_dir, pattern), pattern)[,2]
-
-dat_all_kp <- data.frame()
-
-for (sub in subjects) {
-  sub_dir <- file.path(dat_dir, str_glue("sub-{sub}"), "preproc")
-  
-  load(file.path(sub_dir, str_glue("sub-{sub}_preprocessed.rda")))
-  
-  if ("sessionDuration_minus6sec" %in% colnames(dat_kp)) {
-    dat_kp <- dat_kp %>%
-      select(!c(sessionDuration_minus6sec, session_duration))
-  } else {
-    dat_kp <- dat_kp %>%
-      select(!firstKP_timestamp)
-  }
-  
-  dat_all_kp <- rbind(dat_all_kp, dat_kp)
-}
-
-dat_all_kp
-```
-
-```{r}
-dat_all_kp %>%
-  group_by(phoneType, userID) %>%
-  summarize(
-    distPrevMin = min(distanceFromPrevious, na.rm = TRUE),
-    distPrevMax = max(distanceFromPrevious, na.rm = TRUE))
-```
-
-```{r}
-screen_specs
-```
-
-```{r}
-str_match("Unknown iPhone [iPhone12 X Plus]", "iPhone(\\s?\\w+(?:\\s\\w+)?(?:\\s\\w+)?)-?")
 ```
 
 
@@ -229,39 +197,7 @@ raw_acc %>%
 ```
 
 
-## Normalizing distanceFromPrevious
-
-```{r}
-screen_specs %>% filter(phoneType == "iPhone 12 ")
-```
-
-
-```{r}
-screen_specs <- read.delim("data/iPhone_screen_specs.tsv", strip.white = TRUE)
-  
-points_to_cm <- function(dist, phoneType) {
-  if (is.na(dist) || is.na(phoneType)) {
-    return(NA)
-  }
-  
-  pType <- str_match(phoneType, "iPhone(\\s?\\w+(?:\\s\\w+)?(?:\\s\\w+)?)-?")[,2]
-  pType <- paste("iPhone", pType)
-  
-  spec <- screen_specs %>% filter(phoneType == pType)
-  
-  # Multiply with scale factor to get physical pixels, divide by ppi to
-  # get inches, convert to centimeters by multiplying with 2.54
-  return(dist * spec$scaleFactor / spec$PPI * 2.54)
-}
-
-raw_kp %>%
-  mutate(
-    distanceFromPrevious = map2_dbl(distanceFromPrevious, phoneType, points_to_cm),
-    # distanceFromCenter = map_dbl(distanceFromCenter, points_to_cm, phoneType)
-  )
-
-str(list(c(1, 2), c(3, 4)))
-```
+## Trying out pre-processing
 
 
 ```{r}
@@ -405,55 +341,105 @@ ggpairs(dat_rep_ent %>%
 # save_and_plot(h, "images/splom_self_rep.png", res = 120)
 ```
 
-# Visualise for all subjects
+# Examine all subjects data
 
-```{r warning=FALSE, fig.height=10}
-rep_file <- "../CLEAR3_Biaffect_Leow/Archived Versions/2022-02-15 - Updated Daily Dataset for Elena and Alex/20220215_clear3daily.csv"
-dat_rep_all <- read.csv(rep_file)
+Determine data missingness, number of days, etc.
 
-dat_dir <- "data"
+```{r}
+dirs <- list.dirs(dat_dir)
 
-pattern <- "sub-([0-9]+)"
-subjects <- str_match(dir(dat_dir, pattern), pattern)[,2]
+pattern <- "sub-([0-9]+)/preproc$"
+preproc_paths <- str_subset(dirs, pattern)
+subjects <- as.integer(str_match(preproc_paths, pattern)[,2])
 
-for (sub in subjects) {
-  sub_dir <- file.path(dat_dir, str_glue("sub-{sub}"), "preproc")
+n_sub <- length(subjects)
+dats_acc <- vector("list", n_sub)
+dats_kp <- vector("list", n_sub)
+dats_ses <- vector("list", n_sub)
+```
+
+First load all relevant data. This might take a while.
+
+```{r}
+for (i in 1:length(subjects)) {
+  sub <- subjects[i]
   
-  load(file.path(sub_dir, str_glue("sub-{sub}_preprocessed.rda")))
+  print(str_glue("Loading subject {sub}..."))
   
-  dat_rep <- dat_rep_all %>%
-    filter(id == dat_kp$userID[1]) %>%
-    mutate(daterated = as.Date(daterated, format = "%m/%d/%Y"))
+  preproc_path <- preproc_paths[i]
+  load(file.path(preproc_path, str_glue("sub-{sub}_preprocessed.rda")))
   
-  dat_rep_ent <- dat_rep %>%
-    group_by(
-      year = year(daterated),
-      week = week(daterated)
-    ) %>%
-    summarize(
-      menstrualbleeding = mean(menstrualbleeding, na.rm = T),
-      numdrinks_yest = mean(numdrinks_yest, na.rm = T),
-      workday = mean(workday, na.rm = T),
-      sleepdur_yest = mean(sleepdur_yest, na.rm = T),
-      physicaltension = mean(physicaltension, na.rm = T),
-      wishsleep = mean(wishsleep, na.rm = T),
-      MJuse = mean(MJuse, na.rm = T),
-      irritability_mean = mean(irritability_mean, na.rm = T)
-    ) %>%
-    left_join(dat_ent, by = c("year", "week")) %>%
-    ungroup()
-  
-  h <- ggpairs(dat_rep_ent %>% 
-            select(!c(year, week)),
-    progress = FALSE) +
-    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-  
-  ggsave(file.path(dat_dir, str_glue("sub-{sub}_splom.png")), 
-         plot = h,
-         width = 1920,
-         height = 1080,
-         units = "px",
-         dpi = 100)
+  dats_acc[[i]] <- dat_acc
+  dats_kp[[i]] <- dat_kp
+  dats_ses[[i]] <- dat_ses
 }
+```
+
+Save lists separately, using high compression. Hopefully that will reduce loading overhead next time.
+
+```{r}
+save(dats_acc, file = file.path(dat_dir, "dats_acc.rda"), compress = "xz")
+save(dats_kp, file = file.path(dat_dir, "dats_kp.rda"), compress = "xz")
+save(dats_ses, file = file.path(dat_dir, "dats_ses.rda"), compress = "xz")
+```
+
+```{r}
+load(file.path(dat_dir, "dats_kp.rda"))
+load(file.path(dat_dir, "dats_ses.rda"))
+```
+
+
+```{r}
+diagnostics <- data.frame(subject = subjects, 
+                          n_days = vector("integer", length(subjects)))
+
+for (i in 1:length(subjects)) {
+  diagnostics[i,]$n_days <- n_distinct(dats_ses[[i]]$date)
+}
+
+diagnostics
+```
+
+```{r}
+hist(diagnostics$n_days, main = "Histogram of number of key press data days per subject",
+     xlab = "Number of days of data per subject")
+```
+
+```{r}
+all_rep_dat <- read_sav(file.path(dat_dir, "clear3daily_20220801.sav"))
+all_rep_dat <- zap_labels(all_rep_dat)
+all_rep_dat
+```
+
+```{r}
+nan_summary <- all_rep_dat %>%
+  group_by(id) %>%
+  summarize(
+    n_days = n(),
+    across(menstrualbleeding:LHgroup_perimenstrual_count, ~ mean(is.na(.x)), .names = "{.col}NA")
+  )
+
+nan_summary
+```
+
+```{r fig.height=20}
+par(mfrow = c(10, ceiling(ncol(nan_summary) / 10)))
+
+for (i in 2:ncol(nan_summary)) {
+  hist(nan_summary[[i]], main = colnames(nan_summary)[i])
+}
+```
+
+```{r}
+hist(nan_summary[[2]])
+```
+
+```{r}
+all_rep_dat %>%
+  group_by(id) %>%
+  summarize(
+    n_days = n(),
+    na_cases = n() - complete.cases(cur_data())
+  )
 ```
 
