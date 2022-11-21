@@ -70,11 +70,9 @@ preproc_kp <- function(raw_kp, dat_acc, verbose = FALSE) {
   
   dat_kp <- raw_kp %>%
     mutate(
+      sessionNumber = cumsum(sampleNumber == 1),
       sessionTimestampLocal = as_datetime(sessionTimestamp + createdOnTimeZone * 36),
       keypressTimestampLocal = as_datetime(timestamp + createdOnTimeZone * 36),
-      IKD = c(NA, diff(timestamp)),
-      previousKeyType = lag(keypress_type),
-      sessionNumber = cumsum(sampleNumber == 1),
       phoneType = paste(
         "iPhone",
         str_replace(
@@ -83,6 +81,12 @@ preproc_kp <- function(raw_kp, dat_acc, verbose = FALSE) {
             "iPhone\\s?(\\w+(?:\\s\\w+|\\+)?(?:\\s\\w+)?)-?,?")[,2],
           "\\+", " Plus"))
     ) %>%
+    group_by(sessionNumber) %>%
+    mutate(
+      IKD = c(NA, diff(timestamp)),
+      previousKeyType = lag(keypress_type),
+    ) %>%
+    ungroup() %>%
     select(!c(sessionTimestamp, sessionTimeZone, sampleNumber))
   
   vprint("Converting screen point distance to centimeters...")
