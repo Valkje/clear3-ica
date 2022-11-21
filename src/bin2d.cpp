@@ -1,5 +1,5 @@
 #include <stdlib.h>
-#include <stdexcpt.h>
+#include <stdexcept>
 #include <float.h>
 #include <algorithm>
 #include <Rcpp.h>
