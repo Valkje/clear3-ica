@@ -3,21 +3,57 @@ title: "R Notebook"
 output: html_notebook
 ---
 
-```{r}
-setwd("M:/Documents/Autocorrelation")
+```{r setup}
+wd <- ""
+
+if (.Platform$OS.type == "unix") {
+  # Cluster environment
+  wd <- "~/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
+} else {
+  wd <- "M:/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "data"
+}
+
+# For some reason this sets the pwd only for the current scope, which means it 
+# does not affect anything outside an if block if you set it there.
+# So that's why it's here instead of above.
+setwd(wd) 
 
 source("src/load_dependencies.R")
 ```
 
 ```{r}
-dat_dir <- "data"
-
 dirs <- list.dirs(dat_dir)
 
 pattern <- "sub-([0-9]+)/preproc$"
 preproc_paths <- str_subset(dirs, pattern)
 subjects <- str_match(preproc_paths, pattern)[,2]
 ```
+
+```{r}
+# Vector of indices for all eligible subjects
+sub_idx <- 1:length(subjects)
+
+if (.Platform$OS.type == "unix") {
+  load(file.path(dat_dir, "dats_kp.rda"))
+  load(file.path(dat_dir, "dats_ses.rda"))
+  
+  for (i in sub_idx) {
+    if (n_distinct(dats_ses[[i]]$date) < 30) {
+      # Remove subject index
+      sub_idx <- sub_idx[sub_idx != i]
+    }
+  }
+}
+
+subjects <- subjects[sub_idx]
+dats_kp <- dats_kp[sub_idx]
+dats_ses <- dats_ses[sub_idx]
+```
+
 
 ```{r}
 dists <- vector(mode = "list", length(subjects))
@@ -27,9 +63,13 @@ for (i in 1:length(subjects)) {
   sub <- subjects[i]
   print(str_glue("Working on subject {sub}"))
   
-  preproc_path <- str_subset(preproc_paths, str_glue("sub-{sub}"))
-  preproc_file <- file.path(preproc_path, str_glue("sub-{sub}_preprocessed.rda"))
-  load(preproc_file)
+  if (.Platform$OS.type == "unix") {
+    dat_kp <- dats_kp[[i]]
+  } else {
+    preproc_path <- str_subset(preproc_paths, str_glue("sub-{sub}"))
+    preproc_file <- file.path(preproc_path, str_glue("sub-{sub}_preprocessed.rda"))
+    load(preproc_file)
+  }
   
   dat_kp_alphanum <- dat_kp %>%
     filter(keypress_type == "alphanum", previousKeyType == "alphanum")
@@ -55,13 +95,12 @@ df <- melt(df, id.vars = "x", variable_name = "y")
 df$x <- factor(df$x)
 
 ggplot(df) +
-  geom_raster(aes(x, y, fill = log(value))) +
+  geom_raster(aes(x, y, fill = value)) +
   theme(text = element_text(size=12),
         axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 
-mat <- binCounts(dat_kp_alphanum$distanceFromPrevious, dat_kp_alphanum$IKD, xBreaks, yBreaks)
-ggplot(melt(mat)) +
-  geom_raster(aes(X1, X2, fill = log(value))) +
+ggplot(df) +
+  geom_raster(aes(x, y, fill = log(value))) +
   theme(text = element_text(size=12),
         axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 ```
@@ -343,4 +382,788 @@ m2 <- lm(dPMDD_mean ~ cor, data = dat_rep_cor)
 summary(m2)
 ```
 
+## Investigate autocorrelation
+
+```{r}
+n_days <- nrow(dat_day)
+cors <- matrix(nrow = n_days, ncol = n_days)
+
+pb <- txtProgressBar(max = n_days*n_days, style = 3)
+
+for (i in 1:n_days) {
+  for (j in i:n_days) {
+    setTxtProgressBar(pb, (i-1)*n_days+j)
+    
+    cors[i, j] <- cor(as.vector(dat_day[i,]$hist[[1]]), as.vector(dat_day[j,]$hist[[1]]))
+  }
+}
+
+close(pb)
+```
+
+```{r}
+lag_cors <- melt(cors, varnames = c("i", "j")) %>%
+  mutate(lag = abs(j - i)) %>%
+  group_by(lag) %>%
+  summarize(
+    value = mean(value, na.rm = T)
+  )
+```
+
+```{r}
+ggplot(lag_cors, aes(lag, value)) +
+  geom_line() +
+  geom_point() +
+  ylim(0, 1)
+```
+
+```{r}
+for (i in 1:length(subjects)) {
+  sub <- subjects[i]
+  print(str_glue("Working on subject {sub}"))
+  
+  preproc_path <- str_subset(preproc_paths, str_glue("sub-{sub}"))
+  preproc_file <- file.path(preproc_path, str_glue("sub-{sub}_preprocessed.rda"))
+  load(preproc_file)
+  
+  dat_kp_alphanum <- dat_kp %>%
+      filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+  
+  calcCor <- function(hist, lagged_hist) {
+    if (is.null(lagged_hist))
+      return(NA)
+    
+    cor(as.vector(hist), as.vector(lagged_hist))
+  }
+  
+  dat_day <- dat_kp_alphanum %>%
+    group_by(
+      year = year(sessionTimestampLocal),
+      month = month(sessionTimestampLocal),
+      day = day(sessionTimestampLocal)
+    ) %>%
+    nest() %>%
+    mutate(
+      date = ymd(paste(year, month, day, sep = "-")),
+      numberOfKeyPresses = nrow(data[[1]]),
+      hist = map(data, function(df) {
+        binCounts(df$distanceFromPrevious, df$IKD, xBreaks, yBreaks)
+      })
+    ) %>%
+    ungroup() %>%
+    mutate(
+      cor = map2_dbl(hist, lag(hist), calcCor)
+    )
+  
+  n_days <- nrow(dat_day)
+  cors <- matrix(nrow = n_days, ncol = n_days)
+  
+  pb <- txtProgressBar(max = n_days*n_days, style = 3)
+  
+  for (i in 1:n_days) {
+    for (j in i:n_days) {
+      setTxtProgressBar(pb, (i-1)*n_days+j)
+      
+      cors[i, j] <- cor(as.vector(dat_day[i,]$hist[[1]]), as.vector(dat_day[j,]$hist[[1]]))
+    }
+  }
+  
+  close(pb)
+  
+  lag_cors <- melt(cors, varnames = c("i", "j")) %>%
+    mutate(lag = abs(j - i)) %>%
+    group_by(lag) %>%
+    summarize(
+      value = mean(value, na.rm = T)
+    )
+  
+  g <- ggplot(lag_cors, aes(lag, value)) +
+    geom_line() +
+    geom_point() +
+    ylim(0, 1)
+  
+  print(g)
+}
+```
+
+# Time-dependent identification accuracy
+
+Find appropriate data partitions for all subjects (consider thinning, preserve dates)
+
+Iterate across subjects
+  Iterate across partitions
+   Calculate correlations between source partition and all other partitions
+   Run competition to find identification accuracy
+
+```{r}
+n_sub <- length(subjects)
+```
+
+Partition strategy: Allocate all key presses to their respective dates, then select `n` chunks (i.e. partitions) of days' worth of data. Preferably, these chunks should be about equally sized (where we currently define size as the number of days in that chunk). They should also have some space between them, to reduce short-term autocorrelation influences. Let's make the inter-chunk space as big as the chunks themselves, which means we need to partition the data into `2 * n - 1` chunks and select every odd chunk.
+
+Note: For now we define chunk/partition size by the number of days, but should be aware of the fact that the correlation between histograms greatly depends on the number of data that were fed into the histogram, so perhaps size should be defined as the total number of key presses contained within a chunk.
+
+```{r}
+n_parts <- 10
+# List of partition data frames for all subjects
+sub_partitions <- vector("list", n_sub)
+
+for (i in 1:n_sub) {
+  sub <- subjects[i]
+  
+  print(str_glue("Working on subject {sub}..."))
+  
+  if (.Platform$OS.type == "unix") {
+    dat_kp <- dats_kp[[i]]
+  } else {
+    preproc_path <- preproc_paths[i]
+    load(file.path(preproc_path, str_glue("sub-{sub}_preprocessed.rda")))
+  }
+  
+  dat_kp_alphanum <- dat_kp %>%
+      filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+  
+  dat_kp_alphanum <- dat_kp_alphanum %>%
+    mutate(date = date(keypressTimestampLocal))
+  n_days <- n_distinct(dat_kp_alphanum$date)
+  
+  sub_partitions[[i]] <- dat_kp_alphanum %>%
+    group_by(date) %>%
+    mutate(
+      day_number = cur_group_id(),
+      # Account for the fact that we want these numbers to range from 1 (rather than 0) to 2n-1, and that we use rounding
+      chunk_number = round(day_number / n_days * (2 * n_parts - 1.001) + 0.5) 
+    ) %>%
+    filter(chunk_number %% 2 == 1) %>%
+    group_by(chunk_number) %>%
+    nest() %>%
+    mutate(
+      numberOfKeyPresses = nrow(data[[1]]),
+      hist = map(data, function(df) {
+        binCounts(df$distanceFromPrevious, df$IKD, xBreaks, yBreaks)
+      })
+    )
+}
+```
+
+```{r}
+sub_mats <- lapply(sub_partitions, function(df) {
+  df$hist
+})
+```
+
+
+```{r}
+tdia <- matrix(nrow = n_sub, ncol = n_parts)
+
+pb <- txtProgressBar(max = n_sub * n_parts, style = 3)
+
+# For vapply
+templ <- vector("numeric", n_parts)
+
+for (i in 1:n_sub) {
+  sub <- subjects[i]
+  # print(str_glue("Working on subject {sub}..."))
+  
+  for (j in 1:n_parts) {
+    setTxtProgressBar(pb, (i - 1) * n_parts + j)
+    
+    source <- sub_mats[[i]][[j]]
+        
+    # Of the shape [n_parts] x [n_sub]
+    cors <- vapply(sub_mats, function(mats) {
+      # For every (other) subject...
+      vapply(mats, function(mat) {
+        # For every partition of that subject...
+        cor(as.vector(source), as.vector(mat))
+      }, FUN.VALUE = 0.5)
+    }, FUN.VALUE = templ)
+    
+    # Select the n_parts highest correlations (the first one will be the
+    # correlation of source with itself)
+    lowest_top <- sort(cors, decreasing = TRUE)[n_parts]
+    match_idx <- which(cors >= lowest_top, arr.ind = TRUE)
+    tdia[i, j] <- (sum(match_idx[,2] == i) - 1) / (n_parts - 1)
+  }
+}
+
+close(pb)
+```
+
+```{r}
+i <- 1 # subject
+j <- 2 # partition
+
+source <- sub_mats[[i]][[j]]
+
+# For vapply
+templ <- vector("numeric", n_parts)
+    
+# Of the shape [n_parts] x [n_sub]
+cors <- vapply(sub_mats, function(mats) {
+  # For every (other) subject...
+  vapply(mats, function(mat) {
+    # For every partition of that subject...
+    cor(as.vector(source), as.vector(mat))
+  }, FUN.VALUE = 0.5)
+}, FUN.VALUE = templ)
+
+# Select the n_parts highest correlations (the first one will be the
+# correlation of source with itself)
+lowest_top <- sort(cors, decreasing = TRUE)[n_parts]
+match_idx <- which(cors >= lowest_top, arr.ind = TRUE)
+tdia <- (sum(match_idx[,2] == i) - 1) / (n_parts - 1)
+tdia
+```
+
+```{r}
+tdia
+```
+
+```{r}
+hist(rowMeans(tdia), main = "Histogram of subject-averaged TDIA", 
+     xlab = "Subject-averaged TDIA")
+rowMeans(tdia)
+```
+
+
+```{r}
+print((n_parts - 1) / (n_sub * n_parts - 1))
+mean(tdia)
+```
+
+```{r}
+df <- data.frame(tdia, row.names = subjects)
+colnames(df) <- 1:10
+df <- rownames_to_column(df, "subject")
+df <- melt(df, id.vars = "subject", variable_name = "partition")
+
+ggplot(df, aes(partition, value)) +
+  geom_line(aes(group = subject, color = subject)) +
+  ylab("time-dependent identification accuracy")
+```
+
+## With bootstrapping
+
+The partition strategy is much simpler here: We just partition all data per day. Resampling will take care of the resulting class imbalance. We might still need to think about how we want to tackle autocorrelation, however.
+
+```{r}
+n_sub <- length(subjects)
+
+# List of partition data frames for all subjects
+subject_partitions <- vector("list", n_sub)
+
+for (i in 1:n_sub) {
+  sub <- subjects[i]
+  
+  print(str_glue("Working on subject {sub}..."))
+  
+  if (.Platform$OS.type == "unix") {
+    dat_kp <- dats_kp[[i]]
+  } else {
+    preproc_path <- preproc_paths[i]
+    load(file.path(preproc_path, str_glue("sub-{sub}_preprocessed.rda")))
+  }
+  
+  dat_kp_alphanum <- dat_kp %>%
+      filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+  
+  dat_kp_alphanum <- dat_kp_alphanum %>%
+    mutate(date = date(keypressTimestampLocal))
+  n_days <- n_distinct(dat_kp_alphanum$date)
+  
+  subject_partitions[[i]] <- dat_kp_alphanum %>%
+    group_by(date) %>%
+    nest() %>%
+    mutate(
+      numberOfKeyPresses = nrow(data[[1]]),
+      hist = map(data, function(df) {
+        binCounts(df$distanceFromPrevious, df$IKD, xBreaks, yBreaks)
+      })
+    )
+}
+
+subject_mats <- lapply(subject_partitions, function(df) {
+  df$hist
+})
+```
+
+```{r}
+n_parts <- 10
+
+# Useful for later reference
+sampled_idx <- lapply(lapply(subject_mats, length), sample.int, n_parts, TRUE)
+# Subsampled matrices (with replacement)
+sub_mats <- map2(subject_mats, sampled_idx, ~ .x[.y])
+```
+
+We need to calculate the TDIA `n_iterations` (e.g. 1000) number of times. This can become quite costly, so it might be wise to reduce the number of partitions `n_parts` used in each iteration (to e.g. 5) and look for optimisation opportunities.
+
+```{r}
+# Every (unique) pair of coordinate pairs represents an edge, and for every edge 
+# we need to compute a correlation
+
+# A coordinate pair [e.g. (i, j)] can also be represented as a single number,
+# i.e. (i - 1) * n_parts + j. To create pairs of coordinate pairs, we can create
+# pairs of these single numbers instead.
+n_mats <- n_sub * n_parts
+coords <- 1:n_mats
+
+cors <- matrix(0, n_mats, n_mats)
+
+# These loops will fill only the upper diagonal part of cors
+for (x in coords) {
+  for (y in x:n_mats) {
+    if (x == y)
+      next
+    
+    # Use integer division and the modulo operator to get (i, j) coordinates
+    cors[x, y] <- cor(
+      as.vector(sub_mats[[(x-1) %/% n_parts + 1]][[(x-1) %% n_parts + 1]]),
+      as.vector(sub_mats[[(y-1) %/% n_parts + 1]][[(y-1) %% n_parts + 1]])
+    )
+  }
+}
+
+# Correlation matrices are symmetric
+cors <- cors + t(cors)
+# We already know the diagonal should be all ones
+diag(cors) <- 1
+```
+
+
+Perhaps we can do this in one fell swoop by converting every matrix to a column vector, concatenating all column vectors into a matrix, and call `cor` on that matrix. *Edit*: Indeed, produces the same output as the code block above and is quite a bit faster.
+
+```{r}
+# Produces a 10000*n_parts*n_sub array
+mat <- sapply(sub_mats, function(mats) sapply(mats, as.vector), 
+              simplify = "array")
+# Reshape to 2D array
+dim(mat) <- c(100*100, n_parts*n_sub)
+cors <- cor(mat)
+```
+
+
+Now we need to go over every matrix (source), get the correlations between the source matrix and all other matrices, and determine whether the `n_parts - 1` matrices with the highest correlations are from the same subject.
+
+```{r}
+tdia <- matrix(nrow = n_sub, ncol = n_parts)
+
+for (x in coords) {
+  # Select the n_parts highest correlations (the first one will be the
+  # correlation of source with itself)
+  lowest_top <- sort(cors[x,], decreasing = TRUE)[n_parts]
+  match_idx <- which(cors[x,] >= lowest_top, arr.ind = TRUE)
+  
+  # Get subject index from x (calculate row number of the n_sub*n_parts matrix) 
+  # and match_idx (also row number of that matrix)
+  sub_idx <- (x-1) %/% n_parts + 1
+  match_idx <- (match_idx-1) %/% n_parts + 1
+  
+  part_idx <- (x-1) %% n_parts + 1
+  # Subtract one from the match count to disregard the match of the source
+  # matrix with itself
+  tdia[sub_idx, part_idx] <- (sum(match_idx == sub_idx) - 1) / (n_parts - 1)
+}
+
+mean(tdia)
+```
+
+Putting the thing into a function:
+
+```{r}
+subsampled_tdia <- function(subject_mats, n_parts) {
+  n_sub <- length(subject_mats)
+  
+  # Subsampled matrices (with replacement)
+  sub_mats <- lapply(subject_mats, sample, n_parts, TRUE)
+  
+  # Every (unique) pair of matrices represents an edge, and for every edge 
+  # we need to compute a correlation
+  
+  # A coordinate pair [e.g. (i, j)] can also be represented as a single number,
+  # i.e. (i - 1) * n_parts + j. To create pairs of coordinate pairs, we can create
+  # pairs of these single numbers instead.
+  n_mats <- n_sub * n_parts
+  coords <- 1:n_mats
+  
+  # Produces a 10000*n_parts*n_sub array
+  mat <- sapply(sub_mats, function(mats) sapply(mats, as.vector), 
+                simplify = "array")
+  dim(mat) <- c(100*100, n_parts*n_sub)
+  cors <- cor(mat)
+  
+  tdia <- matrix(nrow = n_sub, ncol = n_parts)
+
+  for (x in coords) {
+    # Select the n_parts highest correlations (the first one will be the
+    # correlation of source with itself)
+    lowest_top <- sort(cors[x,], decreasing = TRUE)[n_parts]
+    match_idx <- which(cors[x,] >= lowest_top, arr.ind = TRUE)
+    
+    # Get subject index from x (calculate row number of the n_sub*n_parts matrix) 
+    # and match_idx (also row number of that matrix)
+    sub_idx <- (x-1) %/% n_parts + 1
+    match_idx <- (match_idx-1) %/% n_parts + 1
+    
+    part_idx <- (x-1) %% n_parts + 1
+    # Subtract one from the match count to disregard the match of the source
+    # matrix with itself
+    tdia[sub_idx, part_idx] <- (sum(match_idx == sub_idx) - 1) / (n_parts - 1)
+  }
+  
+  tdia
+}
+```
+
+```{r}
+mean(subsampled_tdia(subject_mats, n_parts))
+```
+
+Running the bootstrap with parallelization:
+
+```{r}
+n_threads <- 8
+n_iter <- 100
+
+start <- Sys.time()
+
+tdias <- mclapply(1:n_iter, function(iter) {
+  subsampled_tdia(subject_mats, n_parts)
+}, mc.cores = n_threads)
+
+print(Sys.time() - start)
+```
+
+```{r}
+cl <- makeCluster(n_threads)
+clusterSetRNGStream(cl, NULL) # Make sure every thread uses a different RNG stream
+
+clusterExport(cl, c("subsampled_tdia", "subject_mats", "n_parts"))
+
+f <- function(iter) {
+  subsampled_tdia(subject_mats, n_parts)
+}
+
+start <- Sys.time()
+
+res <- parSapply(cl, 1:n_iter, f)
+
+print(Sys.time() - start)
+
+stopCluster(cl)
+```
+
+```{r}
+start <- Sys.time()
+
+res2 <- array(dim = c(n_iter, n_sub, n_parts))
+
+for (i in 1:n_iter) {
+  res2[i,,] <- subsampled_tdia(subject_mats, n_parts)
+}
+
+print(Sys.time() - start)
+```
+
+
+```{r}
+bm <- microbenchmark(subsampled_tdia(subject_mats, n_parts), times = 10)
+bm
+```
+
+### Examining bootstrapped tdias
+
+```{r}
+load(file.path(dat_dir, "tdias.rda"))
+```
+
+```{r}
+sampled_idx <- tdias[2,]
+# List [10000] of n_sub*n_parts matrix
+tdias <- tdias[1,]
+# [n_sub*n_parts]*10000, where every n_parts rows belong to one subject
+tdias <- sapply(tdias, function(x) as.vector(t(x)))
+```
+
+
+Almost perfectly normal (central limit theorem):
+
+```{r}
+iter_means <- data.frame(
+  iter_mean = colMeans(tdias),
+  permuted = FALSE
+)
+
+ggplot(iter_means, aes(iter_mean)) +
+  geom_histogram() +
+  xlab("Mean TDIA") +
+  ylab("Count")
+
+# ggsave("~/Documents/Autocorrelation/images/bootstrap_tdia_iter_hist.png")
+```
+
+
+```{r}
+n_parts <- 10
+tdia_df <- data.frame(
+  subject = rep(1:(dim(tdias)[1]/n_parts), each = n_parts), 
+  tdias
+)
+
+tdia_df
+```
+
+```{r}
+sub_var <- tdia_df %>%
+  group_by(subject) %>%
+  summarize(
+    across(X1:X10000, var)
+  ) %>%
+  rowwise() %>%
+  summarize(
+    variance = mean(c_across(X1:X10000))
+  ) %>%
+  mutate(subject = 1:n())
+
+sub_var
+```
+
+
+```{r}
+sub_tdia <- tdia_df %>%
+  group_by(subject) %>%
+  summarize(
+    across(X1:X10000, mean)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    average = mean(c_across(X1:X10000))
+  ) %>%
+  relocate(average, .before = X1)
+
+sub_tdia
+```
+
+```{r}
+melted_tdia <- melt(as.data.frame(sub_tdia), 
+     id.vars = c("subject", "average"), variable_name = "partition")
+```
+
+
+```{r fig.height=8}
+ggplot(melted_tdia, aes(subject)) +
+  geom_point(aes(y = value), color = alpha("coral1", alpha = 0.01)) +
+  geom_point(aes(y = average), color = "steelblue", size = 3) +
+  xlab("subject") +
+  ylab("Mean TDIA") +
+  theme(text = element_text(size=15))
+
+# ggsave("~/Documents/Autocorrelation/images/bootstrap_tdia_per_subject.png", 
+#        dpi = 100)
+```
+
+```{r}
+tdia_df
+```
+
+```{r}
+tdia_df %>%
+  mutate(partition = rep(1:n_parts, n_sub)) %>%
+  relocate(partition, .before = X1) %>%
+  rowwise() %>%
+  mutate(
+    average = mean(c_across(X1:X10000))
+  ) %>%
+  relocate(average, .before = X1)
+```
+
+```{r}
+# unlist gets you a vector where every n_parts entries are from one subject,
+# and every n_sub*n_parts entries are from one iteration.
+
+n_iter <- length(sampled_idx)
+n_sub <- length(sampled_idx[[1]])
+n_parts <- length(sampled_idx[[1]][[1]])
+idx_df <- data.frame(
+  iteration = rep(1:n_iter, each = n_sub*n_parts),
+  subject = rep(1:n_sub, each = n_parts, times = n_iter),
+  partition_order = rep(1:n_parts, times = n_iter*n_sub),
+  partition_idx = unlist(sampled_idx)
+)
+
+idx_df
+```
+
+```{r}
+partition_df <- tdia_df %>% 
+  pivot_longer(starts_with("X"), 
+               names_to = "iteration", 
+               names_prefix = "X",
+               values_to = "accuracy") %>%
+  mutate(
+    iteration = as.integer(iteration),
+    partition_order = rep(1:n_parts, each = n_iter, times = n_sub)
+  ) %>%
+  arrange(iteration) %>%
+  inner_join(idx_df, by = c("iteration", "subject", "partition_order")) %>%
+  relocate(iteration, .before = subject) %>%
+  relocate(accuracy, .after = partition_idx) %>%
+  group_by(subject, partition_idx) %>%
+  mutate(mean_accuracy = mean(accuracy)) %>%
+  ungroup()
+
+partition_df
+```
+
+```{r fig.height=8, fig.width=18}
+sub <- 7
+
+ggplot(partition_df %>% filter(subject == sub), aes(partition_idx)) +
+  geom_point(aes(y = accuracy), color = "coral1", alpha = 0.01) +
+  geom_point(aes(y = mean_accuracy), color = "steelblue", size = 3) +
+  geom_line(aes(y = mean_accuracy), color = "steelblue") +
+  scale_x_continuous("Partition index") +
+  scale_y_continuous("TDIA") +
+  ggtitle(str_glue("Subject {sub}")) +
+  theme_ipsum(base_size = 15, axis_title_size = 15)
+
+ggsave(str_glue("images/bootstrap_tdia_over_partition_sub_{sub}.png"))
+```
+
+```{r}
+acc_n_iter <- partition_df %>%
+  group_by(subject, partition_idx) %>%
+  summarize(accuracy = mean(accuracy), n = n())
+
+acc_n_iter
+```
+
+```{r}
+ggplot(acc_n_iter) +
+  geom_point(aes(n, accuracy, color = factor(subject)), alpha = 0.5) +
+  xlab("Number of iterations per partition (higher numbers imply less data)") +
+  ylab("TDIA") +
+  guides(color = "none") +
+  theme_ipsum(base_size = 15, axis_title_size = 15)
+
+ggsave("images/bootstrap_tdia_partition_scatter.png")
+```
+
+
+```{r fig.height=10, fig.width=18}
+ggplot(acc_n_iter) +
+  geom_point(aes(n, accuracy)) +
+  facet_wrap(vars(subject))
+```
+
+```{r}
+# Bit of a lazy way to determine how many data each subject is, relies on the
+# fact that there is uniform sampling and enough samples
+acc_var_n_parts <- acc_n_iter %>%
+  summarize(n_parts = max(partition_idx)) %>%
+  inner_join(sub_tdia %>%
+               select(subject, average),
+             by = "subject") %>%
+  inner_join(sub_var, by = "subject")
+
+ggplot(acc_var_n_parts, aes(n_parts, average)) +
+  geom_point(color = "steelblue", alpha = 0.8) +
+  xlab("Number of days of data") +
+  ylab("Mean TDIA") +
+  ylim(0, 1) +
+  theme_ipsum(base_size = 15, axis_title_size = 15)
+
+ggsave("images/bootstrap_scatter_tdia_nData.png")
+```
+
+
+```{r}
+ggplot(acc_var_n_parts, aes(average, variance)) +
+  geom_point(color = "steelblue", alpha = 0.8) +
+  xlab("Mean TDIA") +
+  ylab("Mean variance") +
+  xlim(0, 1) +
+  theme_ipsum(base_size = 15, axis_title_size = 15)
+
+ggsave("images/bootstrap_scatter_tdia_variance.png")
+```
+
+
+#### Permuted
+
+```{r}
+load(file.path(dat_dir, "tdias_permuted.rda"))
+```
+
+```{r}
+# List [10000] of n_sub*n_parts matrix
+perm_tdias <- tdias[1,]
+# [n_sub*n_parts]*10000, where every n_parts rows belong to one subject
+perm_tdias <- sapply(perm_tdias, function(x) as.vector(t(x)))
+```
+
+```{r}
+iter_perm_means <- data.frame(
+  iter_mean = colMeans(perm_tdias),
+  permuted = TRUE
+)
+
+ggplot(iter_perm_means, aes(iter_mean)) +
+  geom_histogram() +
+  xlab("Mean TDIA") +
+  ylab("Count")
+```
+
+```{r fig.height=8}
+perm_tdia_df <- data.frame(
+  subject = rep(1:(dim(perm_tdias)[1]/n_parts), each = n_parts), 
+  perm_tdias
+)
+
+sub_perm_tdia <- perm_tdia_df %>%
+  group_by(subject) %>%
+  summarize(
+    across(X1:X10000, mean)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    average = mean(c_across(X1:X10000))
+  ) %>%
+  relocate(average, .before = X1)
+
+melted_perm_tdia <- melt(as.data.frame(sub_perm_tdia), 
+     id.vars = c("subject", "average"), variable_name = "partition")
+
+ggplot(melted_perm_tdia, aes(subject)) +
+  geom_point(aes(y = value), color = alpha("coral1", alpha = 0.01)) +
+  geom_point(aes(y = average), color = "steelblue", size = 3) +
+  xlab("subject") +
+  ylab("Mean TDIA") +
+  ylim(0, 1) +
+  theme(text = element_text(size=15))
+
+ggsave("~/Documents/Autocorrelation/images/permuted_tdia_per_subject.png",
+       dpi = 100)
+```
+
+```{r fig.height=8}
+iter_all_means <- rbind(iter_means, iter_perm_means)
+
+ggplot(iter_all_means, aes(iter_mean, fill = permuted)) +
+  geom_histogram(color="#e9ecef", bins = 100, alpha = 0.8) +
+  xlab("Mean TDIA") +
+  ylab("Count") +
+  guides(fill = guide_legend("Permuted", reverse = T)) +
+  scale_fill_ipsum() +
+  theme_ipsum(base_size = 15, axis_title_size = 15)
+
+ggsave("images/permuted_tdia_hist.png")
+```
+
+Mean is very close to expected mean of (n_parts - 1) / (n_sub * n_parts - 1) = 0.01768173.
+
+```{r}
+mean(iter_perm_means$iter_mean)
+```
 
