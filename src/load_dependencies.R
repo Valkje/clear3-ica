@@ -8,9 +8,18 @@ library(parallel)
 library(tidyverse)
 library(hrbrthemes)
 library(Rcpp)
-# library(lme4)
+library(tableone)
+library(readxl)
+library(nlme)
+library(lme4)
+library(mice)
+library(miceadds)
 # library(mgcv)
 # library(itsadug)
 
+# Set the filter function to dplyr's version
+filter <- dplyr::filter
+
 source("src/preproc.R")
+source("src/utils.R")
 sourceCpp("src/bin2d.cpp")
