@@ -4,17 +4,19 @@ output: html_notebook
 ---
 
 ```{r setup}
+local <- TRUE
+
 wd <- ""
 
-if (.Platform$OS.type == "unix") {
+if (!local) {
   # Cluster environment
   wd <- "~/Documents/Autocorrelation"
   # Base directory for the data set we will create
   dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
 } else {
-  wd <- "M:/Documents/Autocorrelation"
+  wd <- "~/HPC/Documents/Autocorrelation"
   # Base directory for the data set we will create
-  dat_dir <- "data"
+  dat_dir <- "~/HPC_project/data"
 }
 
 # For some reason this sets the pwd only for the current scope, which means it 
@@ -37,15 +39,13 @@ subjects <- str_match(preproc_paths, pattern)[,2]
 # Vector of indices for all eligible subjects
 sub_idx <- 1:length(subjects)
 
-if (.Platform$OS.type == "unix") {
-  load(file.path(dat_dir, "dats_kp.rda"))
-  load(file.path(dat_dir, "dats_ses.rda"))
-  
-  for (i in sub_idx) {
-    if (n_distinct(dats_ses[[i]]$date) < 30) {
-      # Remove subject index
-      sub_idx <- sub_idx[sub_idx != i]
-    }
+load(file.path(dat_dir, "dats_kp.rda"))
+load(file.path(dat_dir, "dats_ses.rda"))
+
+for (i in sub_idx) {
+  if (n_distinct(dats_ses[[i]]$date) < 30) {
+    # Remove subject index
+    sub_idx <- sub_idx[sub_idx != i]
   }
 }
 
@@ -63,13 +63,7 @@ for (i in 1:length(subjects)) {
   sub <- subjects[i]
   print(str_glue("Working on subject {sub}"))
   
-  if (.Platform$OS.type == "unix") {
-    dat_kp <- dats_kp[[i]]
-  } else {
-    preproc_path <- str_subset(preproc_paths, str_glue("sub-{sub}"))
-    preproc_file <- file.path(preproc_path, str_glue("sub-{sub}_preprocessed.rda"))
-    load(preproc_file)
-  }
+  dat_kp <- dats_kp[[i]]
   
   dat_kp_alphanum <- dat_kp %>%
     filter(keypress_type == "alphanum", previousKeyType == "alphanum")
@@ -224,16 +218,13 @@ calcCor <- function(hist, lagged_hist) {
 
 dat_day <- dat_kp_alphanum %>%
   group_by(
-    year = year(sessionTimestampLocal),
-    month = month(sessionTimestampLocal),
-    day = day(sessionTimestampLocal)
+    date = as_date(sessionTimestampLocal)
   ) %>%
   nest() %>%
   mutate(
-    date = ymd(paste(year, month, day, sep = "-")),
     numberOfKeyPresses = nrow(data[[1]]),
     hist = map(data, function(df) {
-      binCounts(df$distanceFromPrevious, df$IKD, xBreaks, yBreaks)
+      as.matrix(bin2d(df$distanceFromPrevious, df$IKD, 100)$counts)
     })
   ) %>%
   ungroup() %>%
@@ -273,11 +264,9 @@ ggplot(dat_day, aes(date, cor)) +
 ```
 
 ```{r}
-rep_file <- "../CLEAR3_Biaffect_Leow/Archived Versions/2022-02-15 - Updated Daily Dataset for Elena and Alex/20220215_clear3daily.csv"
-dat_rep <- read.csv(rep_file) %>%
-  filter(id == dat_kp$userID[1]) %>%
-  mutate(daterated = as.Date(daterated, format = "%m/%d/%Y"))
-dat_rep
+all_rep_dat <- read_sav("../CLEAR3_Biaffect_Leow/2022-08-01 - Daily Dataset/clear3daily_20220801.sav")
+all_rep_dat <- zap_labels(all_rep_dat)
+all_rep_dat
 ```
 
 ```{r}
@@ -315,13 +304,13 @@ dat_rep_cleaned <- dat_rep_cleaned %>%
   replace_na(rep_list)
 
 # Now trim down heavily on the number of columns, try to summarize where possible
-dat_rep_cleaned %>%
-  mutate(nStressors = sum(stress_1, stress_2, stress_3, stress_4, stress_5,
-                          stress_6, stress_7, stress_8, stress_9, stress_10,
-                          stress_11, stress_12, stress_13, stress_14, 
-                          stress_15)) %>%
-  select(menstrualbleeding, firstdayofperiod, numdrinks_yest, workday, 
-         sleepdur_yest, SleepLNQuality, physicalpain, physicaltension,) # Determine which variables you want to use
+# dat_rep_cleaned %>%
+#   mutate(nStressors = sum(stress_1, stress_2, stress_3, stress_4, stress_5,
+#                           stress_6, stress_7, stress_8, stress_9, stress_10,
+#                           stress_11, stress_12, stress_13, stress_14, 
+#                           stress_15)) %>%
+#   select(menstrualbleeding, firstdayofperiod, numdrinks_yest, workday, 
+#          sleepdur_yest, SleepLNQuality, physicalpain, physicaltension,) # Determine which variables you want to use
 
 dat_rep_cleaned
 ```
@@ -380,110 +369,6 @@ summary(m1)
 ```{r}
 m2 <- lm(dPMDD_mean ~ cor, data = dat_rep_cor)
 summary(m2)
-```
-
-## Investigate autocorrelation
-
-```{r}
-n_days <- nrow(dat_day)
-cors <- matrix(nrow = n_days, ncol = n_days)
-
-pb <- txtProgressBar(max = n_days*n_days, style = 3)
-
-for (i in 1:n_days) {
-  for (j in i:n_days) {
-    setTxtProgressBar(pb, (i-1)*n_days+j)
-    
-    cors[i, j] <- cor(as.vector(dat_day[i,]$hist[[1]]), as.vector(dat_day[j,]$hist[[1]]))
-  }
-}
-
-close(pb)
-```
-
-```{r}
-lag_cors <- melt(cors, varnames = c("i", "j")) %>%
-  mutate(lag = abs(j - i)) %>%
-  group_by(lag) %>%
-  summarize(
-    value = mean(value, na.rm = T)
-  )
-```
-
-```{r}
-ggplot(lag_cors, aes(lag, value)) +
-  geom_line() +
-  geom_point() +
-  ylim(0, 1)
-```
-
-```{r}
-for (i in 1:length(subjects)) {
-  sub <- subjects[i]
-  print(str_glue("Working on subject {sub}"))
-  
-  preproc_path <- str_subset(preproc_paths, str_glue("sub-{sub}"))
-  preproc_file <- file.path(preproc_path, str_glue("sub-{sub}_preprocessed.rda"))
-  load(preproc_file)
-  
-  dat_kp_alphanum <- dat_kp %>%
-      filter(keypress_type == "alphanum", previousKeyType == "alphanum")
-  
-  calcCor <- function(hist, lagged_hist) {
-    if (is.null(lagged_hist))
-      return(NA)
-    
-    cor(as.vector(hist), as.vector(lagged_hist))
-  }
-  
-  dat_day <- dat_kp_alphanum %>%
-    group_by(
-      year = year(sessionTimestampLocal),
-      month = month(sessionTimestampLocal),
-      day = day(sessionTimestampLocal)
-    ) %>%
-    nest() %>%
-    mutate(
-      date = ymd(paste(year, month, day, sep = "-")),
-      numberOfKeyPresses = nrow(data[[1]]),
-      hist = map(data, function(df) {
-        binCounts(df$distanceFromPrevious, df$IKD, xBreaks, yBreaks)
-      })
-    ) %>%
-    ungroup() %>%
-    mutate(
-      cor = map2_dbl(hist, lag(hist), calcCor)
-    )
-  
-  n_days <- nrow(dat_day)
-  cors <- matrix(nrow = n_days, ncol = n_days)
-  
-  pb <- txtProgressBar(max = n_days*n_days, style = 3)
-  
-  for (i in 1:n_days) {
-    for (j in i:n_days) {
-      setTxtProgressBar(pb, (i-1)*n_days+j)
-      
-      cors[i, j] <- cor(as.vector(dat_day[i,]$hist[[1]]), as.vector(dat_day[j,]$hist[[1]]))
-    }
-  }
-  
-  close(pb)
-  
-  lag_cors <- melt(cors, varnames = c("i", "j")) %>%
-    mutate(lag = abs(j - i)) %>%
-    group_by(lag) %>%
-    summarize(
-      value = mean(value, na.rm = T)
-    )
-  
-  g <- ggplot(lag_cors, aes(lag, value)) +
-    geom_line() +
-    geom_point() +
-    ylim(0, 1)
-  
-  print(g)
-}
 ```
 
 # Time-dependent identification accuracy
@@ -957,10 +842,11 @@ ggplot(melted_tdia, aes(subject)) +
   geom_point(aes(y = average), color = "steelblue", size = 3) +
   xlab("subject") +
   ylab("Mean TDIA") +
+  ylim(0, 1) +
   theme(text = element_text(size=15))
 
-# ggsave("~/Documents/Autocorrelation/images/bootstrap_tdia_per_subject.png", 
-#        dpi = 100)
+ggsave("images/bootstrap_tdia_per_subject.png",
+       dpi = 100)
 ```
 
 ```{r}
@@ -1028,7 +914,7 @@ ggplot(partition_df %>% filter(subject == sub), aes(partition_idx)) +
   ggtitle(str_glue("Subject {sub}")) +
   theme_ipsum(base_size = 15, axis_title_size = 15)
 
-ggsave(str_glue("images/bootstrap_tdia_over_partition_sub_{sub}.png"))
+# ggsave(str_glue("images/bootstrap_tdia_over_partition_sub_{sub}.png"))
 ```
 
 ```{r}
@@ -1047,7 +933,7 @@ ggplot(acc_n_iter) +
   guides(color = "none") +
   theme_ipsum(base_size = 15, axis_title_size = 15)
 
-ggsave("images/bootstrap_tdia_partition_scatter.png")
+# ggsave("images/bootstrap_tdia_partition_scatter.png")
 ```
 
 
@@ -1093,7 +979,11 @@ ggsave("images/bootstrap_scatter_tdia_variance.png")
 #### Permuted
 
 ```{r}
-load(file.path(dat_dir, "tdias_permuted.rda"))
+n_parts <- 10
+```
+
+```{r}
+load(file.path(dat_dir, "tdias_permuted_blocked2.rda"))
 ```
 
 ```{r}
@@ -1143,7 +1033,7 @@ ggplot(melted_perm_tdia, aes(subject)) +
   ylim(0, 1) +
   theme(text = element_text(size=15))
 
-ggsave("~/Documents/Autocorrelation/images/permuted_tdia_per_subject.png",
+ggsave("images/permuted_tdia_per_subject_blocked_0.png",
        dpi = 100)
 ```
 
@@ -1151,15 +1041,29 @@ ggsave("~/Documents/Autocorrelation/images/permuted_tdia_per_subject.png",
 iter_all_means <- rbind(iter_means, iter_perm_means)
 
 ggplot(iter_all_means, aes(iter_mean, fill = permuted)) +
-  geom_histogram(color="#e9ecef", bins = 100, alpha = 0.8) +
+  geom_histogram(data = iter_means, color="#e9ecef", bins = 100, alpha = 0.5) +
+  geom_histogram(data = iter_perm_means, color="#e9ecef", bins = 100, alpha = 0.5) +
   xlab("Mean TDIA") +
   ylab("Count") +
   guides(fill = guide_legend("Permuted", reverse = T)) +
   scale_fill_ipsum() +
   theme_ipsum(base_size = 15, axis_title_size = 15)
 
-ggsave("images/permuted_tdia_hist.png")
+# ggsave("images/permuted_tdia_hist.png")
 ```
+
+```{r fig.height=10, fig.width=20}
+melted_tdia$permuted <- FALSE
+melted_perm_tdia$permuted <- TRUE
+
+melted_all <- rbind(melted_tdia, melted_perm_tdia)
+
+ggplot(melted_all, aes(value, fill = permuted)) +
+  geom_histogram(data = melted_tdia, bins = 100, alpha = 0.5) +
+  geom_histogram(data = melted_perm_tdia, bins = 100, alpha = 0.5) +
+  facet_wrap(vars(subject))
+```
+
 
 Mean is very close to expected mean of (n_parts - 1) / (n_sub * n_parts - 1) = 0.01768173.
 

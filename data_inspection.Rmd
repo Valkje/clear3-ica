@@ -4,17 +4,19 @@ output: html_notebook
 ---
 
 ```{r setup}
+local <- TRUE
+
 wd <- ""
 
-if (.Platform$OS.type == "unix") {
+if (!local) {
   # Cluster environment
   wd <- "~/Documents/Autocorrelation"
-  # Base directory for the data set
+  # Base directory for the data set we will create
   dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
 } else {
-  wd <- "M:/Documents/Autocorrelation"
-  # Base directory for the data set
-  dat_dir <- "data"
+  wd <- "~/HPC/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "~/HPC_project/data"
 }
 
 # For some reason this sets the pwd only for the current scope, which means it 
@@ -85,13 +87,56 @@ dat
 # Perimenstrual suicidality data
 
 ```{r}
-all_rep_dat <- read_sav("../CLEAR3_Biaffect_Leow/2022-08-01 - Daily Dataset/clear3daily_20220801.sav")
+all_rep_dat <- read_sav("../CLEAR3_Biaffect_Leow/2022-12-05 - CLEAR3 Daily Dataset/clear3daily_20221205.sav")
 all_rep_dat <- zap_labels(all_rep_dat)
 all_rep_dat
 ```
 
 ```{r}
 table(all_rep_dat$id)
+```
+
+```{r warning=FALSE}
+max.print <- options("max.print")$max.print
+options(max.print = 10 * max.print)
+
+tab1 <- CreateTableOne(data = all_rep_dat)
+print(summary(tab1))
+
+options(max.print = max.print)
+```
+
+As for the 05-12-2022 snapshot of the data set, we see many spurious days for a couple of subjects (with `daterated` already starting in 1990). Those days contain no actual data, we will simply throw them out of the data set. First select only the columns with relevant data:
+
+```{r}
+inclusion <- read_excel("regression_inclusion_20221205.xlsx")$Included
+inclusion <- inclusion[1:ncol(all_rep_dat)]
+# Relevant self-report data
+rel_rep_dat <- all_rep_dat[inclusion == 1]
+rel_rep_dat
+```
+
+
+```{r}
+all_missing <- data.frame(is.na(rel_rep_dat)) %>%
+  rowwise() %>%
+  summarize(allMissing = all(c_across(menstrualbleeding:panicattack)))
+
+# Reduced self-report data
+red_rep_dat <- rel_rep_dat[!all_missing$allMissing,]
+red_rep_dat
+```
+
+A reduction of about 22,000 rows. Let's see what TableOne has to say about the data now. But first we throw out the text responses.
+
+```{r warning=FALSE}
+max.print <- options("max.print")$max.print
+options(max.print = 10 * max.print)
+
+tab1 <- CreateTableOne(data = red_rep_dat)
+print(summary(tab1))
+
+options(max.print = max.print)
 ```
 
 
