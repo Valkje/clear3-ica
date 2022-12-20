@@ -1,0 +1,204 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+local <- TRUE
+
+wd <- ""
+
+if (!local) {
+  # Cluster environment
+  wd <- "~/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
+} else {
+  wd <- "~/HPC/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "~/HPC_project/data"
+}
+
+# For some reason this sets the pwd only for the current scope, which means it 
+# does not affect anything outside an if block if you set it there.
+# So that's why it's here instead of above.
+setwd(wd) 
+
+source("src/load_dependencies.R")
+```
+
+# Loading and selecting data
+
+```{r}
+dirs <- list.dirs(dat_dir)
+
+pattern <- "sub-([0-9]+)/preproc$"
+preproc_paths <- str_subset(dirs, pattern)
+subjects <- str_match(preproc_paths, pattern)[,2]
+```
+
+```{r}
+# Vector of indices for all eligible subjects
+sub_idx <- 1:length(subjects)
+
+load(file.path(dat_dir, "dats_kp.rda"))
+load(file.path(dat_dir, "dats_ses.rda"))
+
+for (i in sub_idx) {
+  if (n_distinct(dats_ses[[i]]$date) < 30) {
+    # Remove subject index
+    sub_idx <- sub_idx[sub_idx != i]
+  }
+}
+
+subjects <- subjects[sub_idx]
+dats_kp <- dats_kp[sub_idx]
+dats_ses <- dats_ses[sub_idx]
+```
+
+```{r}
+dists <- vector(mode = "list", length(subjects))
+ikds <- vector(mode = "list", length(subjects))
+
+for (i in 1:length(subjects)) {
+  dat_kp <- dats_kp[[i]]
+  
+  dat_kp_alphanum <- dat_kp %>%
+    filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+  
+  dists[[i]] <- dat_kp_alphanum$distanceFromPrevious
+  ikds[[i]] <- dat_kp_alphanum$IKD
+}
+
+ls <- bin2d(unlist(dists), unlist(ikds), xBins = 100, yBins = 100)
+xBreaks <- ls$xBreaks
+yBreaks <- ls$yBreaks
+```
+
+
+# Partitioning and binning data
+
+```{r}
+n_sub <- length(subjects)
+
+# List of partition data frames for all subjects
+subject_partitions <- vector("list", n_sub)
+
+for (i in 1:n_sub) {
+  sub <- subjects[i]
+  
+  print(str_glue("Working on subject {sub}..."))
+  
+  dat_kp <- dats_kp[[i]]
+  
+  dat_kp_alphanum <- dat_kp %>%
+      filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+  
+  dat_kp_alphanum <- dat_kp_alphanum %>%
+    mutate(date = date(keypressTimestampLocal))
+  n_days <- n_distinct(dat_kp_alphanum$date)
+  
+  subject_partitions[[i]] <- dat_kp_alphanum %>%
+    group_by(date) %>%
+    nest() %>%
+    mutate(
+      numberOfKeyPresses = nrow(data[[1]]),
+      hist = map(data, function(df) {
+        binCounts(df$distanceFromPrevious, df$IKD, xBreaks, yBreaks)
+      })
+    )
+}
+
+subject_mats <- lapply(subject_partitions, function(df) {
+  df$hist
+})
+```
+
+# Calculating autocorrelations
+
+## Histograms
+
+Note: This does not take into account that data partitions might not be consecutive days (sometimes days are missing).
+
+```{r}
+lag_cors <- vector("list", length(subjects))
+
+for (i in 1:length(subjects)) {
+  sub <- subjects[i]
+  print(str_glue("Working on subject {sub}"))
+  
+  # Gives 10000*n_days matrix
+  mat_flat <- sapply(subject_mats[[i]], as.vector)
+  cors <- cor(mat_flat)
+  
+  lag_cors[[i]] <- melt(cors, varnames = c("i", "j")) %>%
+    mutate(lag = abs(j - i)) %>%
+    group_by(lag) %>%
+    summarize(
+      value = mean(value, na.rm = T)
+    )
+  
+  g <- ggplot(lag_cors[[i]], aes(lag, value)) +
+    geom_line() +
+    geom_point() +
+    ylim(0, 1)
+  
+  print(g)
+  
+  # out_path <- file.path("images", "autocorrelation")
+  # dir.create(out_path, showWarnings = FALSE, recursive = TRUE)
+  # 
+  # out_file <- file.path(out_path, str_glue("sub-{sub}_autocor_hist.png"))
+  # ggsave(out_file, plot = g)
+}
+```
+
+## TDIAs
+
+```{r}
+load(file.path(dat_dir, "tdias.rda"))
+```
+
+```{r}
+sub_tdia <- link_tdia_date(tdias, subjects, dats_kp)
+sub_tdia
+```
+
+```{r fig.height=8}
+acfs <- vector("list", length(subjects))
+
+for (i in seq_along(subjects)) {
+  sub <- subjects[i]
+  
+  par(mfrow = c(2, 1), mar=c(5.1,4.1,4.5,2.1))
+  
+  lag_cor <- lag_cors[[i]]
+  plot(lag_cor$lag, lag_cor$value, type = "b", ylim = c(0, 1), 
+       main = str_glue("Subject {sub} histogram autocorrelation"),
+       xlab = "Lag", ylab = "Correlation")
+  
+  acfs[[i]] <- acf(sub_tdia$mean_accuracy[sub_tdia$subject == sub], lag.max = 300, main = str_glue("Subject {sub} TDIA autocorrelation"))
+}
+```
+
+## Within-subject correlations
+
+```{r}
+for (i in seq_along(subjects)) {
+  png(str_glue("images/autocorrelation/correlations/sub-{subjects[i]}_cor_autocor.png"),
+      width = 1920, height = 1080, units = "px", pointsize = 20)
+  
+  # sapply gives [dim_hist^2] x [n_days] matrix (e.g. 10000 x 33)
+  cors <- cor(sapply(subject_mats[[i]], as.vector))
+  
+  par(mar=c(5.1,4.1,4.5,2.1))
+  acf(cors[1,], lag.max = 300, main = str_glue("Subject {subjects[i]}"))
+  for (j in 1:ncol(cors)) {
+    a <- acf(cors[j,], lag.max = 300, plot = FALSE)
+    points(a$lag[,1,1], a$acf[,1,1], col = alpha("black", 0.2))
+  }
+  
+  dev.off()
+}
+```
+
