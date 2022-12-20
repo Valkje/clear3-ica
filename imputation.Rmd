@@ -1,0 +1,338 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+local <- TRUE
+
+wd <- ""
+
+if (!local) {
+  # Cluster environment
+  wd <- "~/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
+} else {
+  wd <- "~/HPC/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "~/HPC_project/data"
+}
+
+# For some reason this sets the pwd only for the current scope, which means it 
+# does not affect anything outside an if block if you set it there.
+# So that's why it's here instead of above.
+setwd(wd) 
+
+source("src/load_dependencies.R")
+```
+
+```{r}
+load(file.path(dat_dir, "dat_reg.rda"))
+```
+
+```{r}
+max.print <- options("max.print")$max.print
+options(max.print = 10 * max.print)
+
+tab1 <- CreateTableOne(data = dat_reg)
+print(summary(tab1))
+
+options(max.print = max.print)
+```
+
+Partition index and date should be removed before imputation, as they are nothing more than administrative data.
+
+```{r}
+dat_reg <- dat_reg %>%
+  select(!c(partition_idx, date))
+```
+
+
+Get in-/outbound statistics, in-/outflux, etc.
+
+```{r}
+pat <- md.pattern(dat_reg)
+prs <- md.pairs(dat_reg)
+prs
+```
+
+In-/outbound statistics:
+
+```{r}
+inbound <- prs$mr/(prs$mr+prs$mm)
+outbound <- prs$rm/(prs$rm+prs$rr)
+```
+
+In-/outflux:
+
+```{r}
+flx <- flux(dat_reg)
+flx
+```
+
+```{r}
+fluxplot(dat_reg)
+```
+
+Many self-report variables have almost no influx, and a moderate to little amount of outflux. This is probably the case because when one self-report variable is missing, many others are also likely to be missing. I do wonder what the relationship between these self-report variables and mean_accuracy is, however.
+
+```{r}
+inbound[,"mean_accuracy"] # Self-report measures are missing, mean_accuracy exists
+```
+
+Pretty good inbound values. On the other hand, this does mean that we are in the awkward situation where there are quite some rows for which we have smartphone data, but no self-report data. Does this also hold vice versa?
+
+```{r}
+inbound["mean_accuracy",] # mean_accuracy is missing, self-report measures exist
+```
+
+It seems so.
+
+So, in general, all self-report measures seem useful for predicting mean_accuracy (given the high inbound statistics and influx score), while only mean_accuracy is useful for predicting the missing self-report measures (given the high mean_accuracy inbound statistics but low influx scores for all the self-report measures).
+
+Using all self-report variables to predict mean_accuracy might be a bit much, though. Let's start with an initial guess by quickpred instead. mean_accuracy is important in subsequent analysis, so we want to include it as a predictor for every other variable (as recommended by Van Buuren). We exclude subject as a predictor, as it is a factor that explodes into many dummy variables in the imputation. We use the spearman correlation, as we're mostly working with Likert scales.
+
+```{r}
+qpred_mat <- quickpred(dat_reg, 
+                       method = "spearman", 
+                       include = c("mean_accuracy"),
+                       exclude = c("subject"))
+
+print(table(rowSums(qpred_mat)))
+mean(rowSums(qpred_mat))
+```
+
+```{r}
+n_threads <- 7
+
+cl <- makeCluster(n_threads)
+clusterSetRNGStream(cl, NULL) # Make sure every node uses a different RNG stream
+
+clusterExport(cl, c("dat_reg", "qpred_mat"))
+clusterEvalQ(cl, library(mice))
+
+start <- Sys.time()
+
+imp_pars <- parLapply(cl, 1:n_threads, function(x) {
+  mice(dat_reg, m = 5, predictorMatrix = qpred_mat, printFlag = FALSE)
+})
+
+print(Sys.time() - start)
+
+stopCluster(cl)
+```
+
+```{r}
+imp_merged <- imp_pars[[1]]
+for (i in 2:length(imp_pars)) {
+  imp_merged <- ibind(imp_merged, imp_pars[[i]])
+}
+```
+
+
+```{r}
+imp_merged$loggedEvents
+```
+
+Visualise some of the imputed data
+
+```{r}
+cd <- complete(imp_merged)
+miss <- is.na(imp_merged$data$mean_accuracy) | is.na(imp_merged$data$numdrinks_yest)
+cd$missing <- miss
+
+xyplot(jitter(mean_accuracy) ~ jitter(numdrinks_yest), 
+       cd, groups = missing, col = c(mdc(1), mdc(2)), alpha = 0.2)
+```
+
+```{r fig.height=10, fig.width=20}
+densityplot(imp_merged)
+```
+
+```{r}
+mice::bwplot(imp_merged, mean_accuracy)
+```
+
+
+Most imputed distributions match the observed distributions well, but I have some doubts about the imputed distributions of mean_accuracy. These data might not be missing at random (MAR). To check that hypothesis, let's calculate propensity scores (probability that mean_accuracy is missing given all other variables) and check the distribution of observed and imputed mean_accuracy conditioned on the propensity score.
+
+```{r}
+get_propensity <- function(imp) {
+  # Not too proud of this code, but dot notation doesn't work
+  mis_fit <- with(imp, glm(ici(imp) ~ mean_accuracy
+                                      + menstrualbleeding
+                                      + firstdayofperiod
+                                      + numdrinks_yest
+                                      + workday
+                                      + sleepdur_yest
+                                      + SleepLNQuality
+                                      + physicalpain
+                                      + physicaltension
+                                      + wantedNSSI
+                                      + DRSPx_panicked
+                                      + DRSPx_worried
+                                      + DRSPx_afraid
+                                      + DRSPx_notenjoy
+                                      + DRSPx_unmotivated
+                                      + DRSP10_diffconc
+                                      + DRSP12_appoverate
+                                      + DRSP17_outofcontrol
+                                      + DRSP18_breasttender
+                                      + DRSP19_swellbloat
+                                      + DRSP20_headache
+                                      + perceivedburden
+                                      + forgetful
+                                      + distractable
+                                      + troubleadjust
+                                      + PANAS_happy
+                                      + belonging_
+                                      + mastery
+                                      + eat_restrict
+                                      + eat_binge
+                                      + eat_purge
+                                      + mhpYN_1
+                                      + mhpYN_2
+                                      + mhpYN_0
+                                      + usedPRN
+                                      + NSSIyn
+                                      + MJuse
+                                      + recdrugs_yn
+                                      + panicattack
+                                      + suicidality_mean
+                                      + PMDDemosx_mean
+                                      + environment_int
+                                      + rumination
+                                      + agitation
+                                      + impulsivity
+                                      + irritability_mean
+                                      + n_stressors,
+                    family = binomial))
+  rep(rowMeans(sapply(mis_fit$analyses, fitted.values)), imp$m + 1)
+}
+```
+
+```{r fig.height=10, fig.width=20}
+ps <- get_propensity(imp_merged)
+xyplot(imp_merged, mean_accuracy ~ ps | as.factor(.imp),
+       xlab = "Probability that record is incomplete",
+       ylab = "Mean TDIA", pch = c(1, 19), col = mdc(1:2))
+```
+
+Overall, I would say the conditional distributions match up relatively well for mean_accuracy. Testing this for the self-report variable numdrinks_yest:
+
+```{r fig.height=10, fig.width=20}
+xyplot(imp_merged, numdrinks_yest ~ ps | as.factor(.imp),
+       xlab = "Probability that record is incomplete",
+       ylab = "Number of drinks yesterday", pch = c(1, 19), col = mdc(1:2))
+```
+
+These conditional distributions seem a bit fishy. For the propensity scores where there actually is imputed data, the distribution seems to be quite good, but for other propensity scores the distribution technically does not fit (because there are no imputed points at all). 
+
+Save the imputations.
+
+```{r}
+save(imp_merged, file = file.path(dat_dir, "imp_merged.rda"))
+```
+
+```{r}
+load(file.path(dat_dir, "imp_merged.rda"))
+```
+
+# Multilevel imputation
+
+The subjects form structure in our data, a.k.a. clusters. Using single-level method for multiple imputation "can be more hazardous than listwise deletion", so we should think about multilevel methods. These multilevel methods often involve mixed-effects imputation models. I reckon that fitting such models for every incomplete variable in our data set would be very computationally expensive (but I might want to double check that assumption), so it might be best to pick a couple of 'important' variables that have to be imputed with multilevel methods. But let's first check what happens if I use a multilevel (generalized) linear mixed effects + PMM imputation model for all variables.
+
+To do so, we have to modify the predictor matrix.
+
+```{r}
+qpred_multi <- qpred_mat
+qpred_multi[,"subject"] <- -2 # Cluster variable
+qpred_multi["subject", "subject"] <- 0 # subject itself does not need to be imputed
+qpred_multi[qpred_multi == 1] <- 3 # + covariate's cluster mean
+```
+
+```{r}
+should.rescale <- sapply(dat_reg, typeof) == "double"
+
+dat_reg_scaled <- dat_reg
+dat_reg_scaled[,should.rescale] <- scale(dat_reg_scaled[,should.rescale],
+                                         scale = FALSE)
+
+dat_reg_scaled$subject <- as.integer(dat_reg_scaled$subject)
+```
+
+```{r}
+n_threads <- 7
+
+cl <- makeCluster(n_threads)
+clusterSetRNGStream(cl, NULL) # Make sure every node uses a different RNG stream
+
+clusterExport(cl, c("dat_reg_scaled", "qpred_multi", "mice.impute.2l.pmm"))
+clusterEvalQ(cl, library(mice))
+
+start <- Sys.time()
+
+imp_pars <- parLapply(cl, 1:n_threads, function(x) {
+  mice(dat_reg_scaled, 
+       m = 5, 
+       predictorMatrix = qpred_multi, 
+       method = "2l.pmm",
+       printFlag = TRUE)
+})
+
+print(Sys.time() - start)
+
+stopCluster(cl)
+```
+
+The mixed models complain a bit for firstdayofperiod and wantedNSSI, but their imputed densities seem fine (see below), so I will leave those models as-is.
+
+```{r}
+imp_multi <- imp_pars[[1]]
+for (i in 2:length(imp_pars)) {
+  imp_multi <- ibind(imp_multi, imp_pars[[i]])
+}
+```
+
+
+```{r}
+mice::bwplot(imp_multi, mean_accuracy)
+```
+
+```{r fig.height=10, fig.width=10}
+densityplot(imp_merged, ~ mean_accuracy)
+```
+
+```{r fig.height=10, fig.width=10}
+densityplot(imp_multi, ~ mean_accuracy + numdrinks_yest)
+```
+
+```{r fig.height=10, fig.width=20}
+xyplot(imp_merged, numdrinks_yest ~ ps | as.factor(.imp),
+       xlab = "Probability that record is incomplete",
+       ylab = "Number of drinks yesterday", pch = c(1, 19), col = mdc(1:2))
+```
+
+```{r}
+save(imp_multi, file = file.path(dat_dir, "imp_multi.rda"))
+```
+
+```{r}
+load(file.path(dat_dir, "imp_multi.rda"))
+```
+
+```{r fig.height=10}
+ps <- get_propensity(imp_multi)
+xyplot(imp_multi, mean_accuracy ~ ps | as.factor(.imp),
+       xlab = "Probability that record is incomplete",
+       ylab = "Mean TDIA (scaled)", pch = c(1, 19), col = mdc(1:2))
+```
+
+```{r fig.height=10}
+xyplot(imp_multi, numdrinks_yest ~ ps | as.factor(.imp),
+       xlab = "Probability that record is incomplete",
+       ylab = "Number of drinks yesterday (scaled)", pch = c(1, 19), 
+       col = mdc(1:2))
+```
+
