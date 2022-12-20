@@ -2,3 +2,7 @@
 data/
 synapse_output/
 getKeypress_fromHealthIDs_blankTemplate.py
+keypress_preprocessing_blankTemplate.py
+._*
+*.knit.md
+*.nb.html
