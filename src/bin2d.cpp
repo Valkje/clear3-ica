@@ -41,7 +41,8 @@ IntegerMatrix binCounts(
     const NumericVector& x, 
     const NumericVector& y, 
     const NumericVector& xBreaks, 
-    const NumericVector& yBreaks) {
+    const NumericVector& yBreaks
+) {
   // The breaks indicate the borders of the bins/cells. If there are n breaks,
   // there are n-1 cells.
   // TODO: Change to calloc
@@ -63,6 +64,94 @@ IntegerMatrix binCounts(
   }
   
   return counts;
+}
+
+struct vectorBreakPair {
+  NumericVector v;
+  NumericVector breaks;
+};
+
+/**
+ Given the indices into a multidimensional array, calculate the index into its
+ flattened version.
+ 
+ Not as general as I'd like what with IntegerVector instead of a std::vector
+ of uint64_t, but I can't be bothered to work out the conversion between the
+ two.
+ */
+uint64_t getLinearIndex(
+    const std::vector<uint64_t>& idxs, 
+    const IntegerVector& dims
+) {
+  uint64_t linearIndex = 0;
+  uint64_t dimProduct = 1;
+  
+  for (uint64_t i = 0; i < idxs.size(); i++) {
+    linearIndex += idxs[i] * dimProduct;
+    dimProduct *= dims[i];
+  }
+  
+  return linearIndex;
+}
+
+IntegerVector binCountsNd(
+    const NumericMatrix& vecMat, 
+    const std::vector<NumericVector>& breaks
+) {
+  // Size of every dimension of the ND histogram
+  IntegerVector histDims(breaks.size());
+  
+  // Check that all vectors have the same length
+  for (uint_fast32_t i = 0; i < breaks.size(); i++)
+    histDims[i] = breaks[i].length() - 1;
+  
+  // Initialize Nd count vector
+  IntegerVector counts(Dimension{histDims});
+  for (uint_fast32_t i = 0; i < counts.length(); i++)
+    counts[i] = 0;
+  
+  // Get bin for every vector
+  // Add 1 to appropriate cell in count vector
+  bool isNa;
+  std::vector<uint64_t> bins(vecMat.ncol());
+  uint64_t idx;
+  
+  // For every entry i in each vector...
+  for (uint_fast32_t i = 0; i < vecMat.nrow(); i++) {
+    // Check if any of the vectors contains an NA at location i. If so, 
+    // continue to next iteration.
+    isNa = false;
+    
+    for (uint_fast32_t j = 0; j < vecMat.ncol(); j++) {
+      if (NumericMatrix::is_na(vecMat(i, j))) {
+        isNa = true;
+        break;
+      }
+    }
+    
+    if (isNa)
+      continue;
+    
+    // For every vector+break pair j...
+    for (uint_fast32_t j = 0; j < vecMat.ncol(); j++) {
+      bins[j] = getBin(vecMat(i, j), breaks[j]);
+    }
+    
+    idx = getLinearIndex(bins, histDims);
+    counts[idx] += 1;
+  }
+  
+  return counts;
+}
+
+// Overload of binCountsNd above
+//[[Rcpp::export]]
+IntegerVector binCountsNd(const NumericMatrix& vecMat, const List& breaks) {
+  std::vector<NumericVector> breaksVec(breaks.size());
+  for (uint_fast32_t i = 0; i < breaks.size(); i++)
+    breaksVec[i] = breaks[i];
+  
+  return binCountsNd(vecMat, breaksVec);
 }
 
 double minNa(const NumericVector& vec) {
@@ -150,27 +239,60 @@ List bin2d(NumericVector x, NumericVector y, int xBins, int yBins = -1) {
                       _["yBreaks"] = yBreaks);
 }
 
+// [[Rcpp::export]]
+List binNd(NumericMatrix vectorMat, IntegerVector nBins) {
+  if (vectorMat.ncol() != nBins.length())
+    stop("The length of `nBins` does not match the number of columns in `vectorMat`");
+  
+  std::vector<NumericVector> breaks(nBins.length());
+  
+  for (uint_fast32_t i = 0; i < nBins.length(); i++)
+    breaks[i] = calcBreaks(vectorMat.column(i), nBins[i]);
+  
+  IntegerVector counts = binCountsNd(vectorMat, breaks);
+
+  return List::create(_["counts"] = counts,
+                      // Rcpp will convert `breaks` to a list for us
+                      _["breaks"] = breaks); 
+}
+
 // You can include R code blocks in C++ files processed with sourceCpp
 // (useful for testing and development). The R code will be automatically 
 // run after the compilation.
 //
 
-/** R 
+/*** R 
 library(reshape)
 library(tidyverse)
 
 xBreaks <- seq(0, 1, 0.001)
 yBreaks <- seq(0, 1, 0.1)
+z1Breaks <- seq(0, 1, 0.01)
+z2Breaks <- seq(0, 1, 0.01)
 set.seed(42)
 x <- runif(1000000)
 y <- runif(1000000)
+z1 <- runif(1000000)
+z2 <- runif(1000000)
 
-# binCounts(x, y, xBreaks, yBreaks)
+mat <- binCounts(x, y, xBreaks, yBreaks)
+
 ls <- bin2d(x, y, 10, 100)
-print(ls)
+df <- melt(t(ls$counts))
+# print(ls)
+# 
+# df <- ls[[1]]
+# df <- rownames_to_column(df, "x")
+# df <- melt(df, id.vars = "x", variable_name = "y")
+# df
+ 
+# matNd <- binCountsNd(cbind(x, y, z1, z2), list(xBreaks, yBreaks, z1Breaks, z2Breaks))
+# print(paste("mat and mat3d counts match:", all(mat == apply(matNd, c(1, 2), sum))))
 
-df <- ls[[1]]
-df <- rownames_to_column(df, "x")
-df <- melt(df, id.vars = "x", variable_name = "y")
-df
+ls <- binNd(cbind(x, y, z1, z2), c(10, 100, 100, 100))
+dfNd <- melt(ls$counts) %>%
+  group_by(X1, X2) %>%
+  summarize(value = sum(value))
+
+print(paste("df and dfNd counts match:", all(df$value == dfNd$value)))
 */
