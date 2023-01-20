@@ -488,3 +488,89 @@ all_rep_dat %>%
   )
 ```
 
+
+
+# Subject 2D histogram correlation matrices
+
+```{r}
+ls <- get_partitions(dat_dir)
+subjects <- ls$dat$subjects
+dats_kp <- ls$dat$dats_kp
+dats_ses <- ls$dat$dats_ses
+subject_mats <- ls$subject_mats
+```
+
+```{r}
+save(subject_mats, file = file.path(dat_dir, "subject_mats.rda"))
+```
+
+```{r fig.height=10}
+n_sub <- length(subjects)
+
+for (i in 1:n_sub) {
+  cors <- cor(sapply(subject_mats[[i]], as.vector))
+  g1 <- ggplot(melt(cors), aes(X1, X2)) +
+    geom_raster(aes(fill = value)) + 
+    scale_y_reverse() +
+    ggtitle(str_glue("Subject {subjects[i]}"))
+  
+  df <- data.frame(mean_cor = colMeans(cors), X1 = 1:ncol(cors))
+  g2 <- ggplot(df, aes(X1, mean_cor)) +
+    geom_line() +
+    geom_point() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = seq(0, ncol(cors), 10), 
+                       minor_breaks = 1:ncol(cors)) +
+    ylab("Mean correlation")
+  
+  acfs <- apply(cors, 1, acf, lag.max = 300, plot = FALSE)
+  df <- melt(t(sapply(acfs, function(x) x$acf)))
+  g3 <- ggplot(df, aes(X2, value)) +
+    geom_point(alpha = 0.2) +
+    scale_x_continuous(breaks = seq(0, ncol(cors), 10), 
+                       minor_breaks = 1:ncol(cors)) +
+    xlab("X1") +
+    ylab("Autocorrelation")
+  
+  g <- ggarrange(g1, g2, g3, nrow = 3, common.legend = TRUE)
+  
+  print(g)
+  
+  ggsave(str_glue("images/autocorrelation/correlations/sub-{subjects[i]}_cor-mat_autocor.png"))
+}
+```
+
+```{r}
+cors <- cor(sapply(subject_mats[[which(subjects == "3083")]], as.vector))
+ggplot(melt(cors), aes(X1, X2)) +
+  geom_raster(aes(fill = value)) + 
+  scale_y_reverse() +
+  ggtitle(str_glue("Subject 3083")) +
+  labs(fill = "Correlation")
+
+ggsave("images/autocorrelation/correlations/sub-3083_cor_mat.png")
+```
+
+# Confusion matrix of TDIA calculation
+
+```{r}
+ls <- parse_tdia_jld(file.path(dat_dir, "tdias_flattened_p.jld"))
+conf_mat <- ls$conf_mat
+```
+
+```{r fig.height=8}
+# Something to be aware of: X2 indicates the column number, not the row number
+ggplot(melt(conf_mat), aes(X2, X1)) +
+  geom_raster(aes(fill = value)) + 
+  scale_y_reverse()
+
+ggplot(melt(conf_mat), aes(X2, X1)) +
+  geom_raster(aes(fill = log(value))) + 
+  scale_y_reverse()
+```
+
+```{r fig.height=8}
+b <- barplot(colSums(conf_mat))
+axis(1, b, labels = 1:ncol(conf_mat))
+```
+
