@@ -4,7 +4,7 @@ output: html_notebook
 ---
 
 ```{r setup}
-local <- TRUE
+local <- FALSE
 
 wd <- ""
 
@@ -28,8 +28,21 @@ source("src/load_dependencies.R")
 ```
 
 ```{r}
-load(file.path(dat_dir, "dat_reg.rda"))
+load(file.path(dat_dir, "dat_reg_tdia_30_blocked.rda"))
 ```
+
+DEPRECATED; Filter out subjects who don't have any TDIA measures (i.e. <30 days of data).
+
+```{r}
+# ls <- load_subject_key_data(dat_dir, load_kp = FALSE)
+# 
+# subjects <- ls$subjects
+# 
+# dat_reg <- dat_reg %>%
+#   filter(subject %in% subjects) %>%
+#   mutate(subject = droplevels(subject))
+```
+
 
 ```{r}
 max.print <- options("max.print")$max.print
@@ -103,8 +116,15 @@ print(table(rowSums(qpred_mat)))
 mean(rowSums(qpred_mat))
 ```
 
+There might be a connection between the number of drinks had yesterday and mean_accuracy, so let's take that into account in the imputation model.
+
 ```{r}
-n_threads <- 7
+qpred_mat["mean_accuracy", "numdrinks_yest"] <- 1
+```
+
+
+```{r}
+n_threads <- 10
 
 cl <- makeCluster(n_threads)
 clusterSetRNGStream(cl, NULL) # Make sure every node uses a different RNG stream
@@ -151,6 +171,27 @@ densityplot(imp_merged)
 ```
 
 ```{r}
+cols <- colnames(dat_reg)
+ds <- vector("list", length(cols) - 1)
+
+pb <- txtProgressBar(max = length(ds), style = 3)
+
+for (i in 2:length(cols)) {
+  ds[[i - 1]] <- densityplot(imp_merged, as.formula(str_glue("~ {cols[i]}")))
+  setTxtProgressBar(pb, i-1)
+}
+
+close(pb)
+```
+
+```{r fig.height=10, fig.width=20}
+g <- ggarrange(plotlist = ds)
+ggsave("images/imputation/imp_singlelevel_morebiaffect.png", g, 
+       width = 2*1920, height = 2*1080, units = "px", dpi = 100)
+```
+
+
+```{r}
 mice::bwplot(imp_merged, mean_accuracy)
 ```
 
@@ -160,7 +201,16 @@ Most imputed distributions match the observed distributions well, but I have som
 ```{r}
 get_propensity <- function(imp) {
   # Not too proud of this code, but dot notation doesn't work
-  mis_fit <- with(imp, glm(ici(imp) ~ mean_accuracy
+  mis_fit <- with(imp, glm(ici(imp) ~ medianIKD
+                                      + percent95IKD
+                                      + madIKD
+                                      + autocorrectRate
+                                      + backspaceRate
+                                      + totalKeyPresses
+                                      + active
+                                      + upright
+                                      + bed
+                                      + mean_accuracy
                                       + menstrualbleeding
                                       + firstdayofperiod
                                       + numdrinks_yest
@@ -232,16 +282,16 @@ These conditional distributions seem a bit fishy. For the propensity scores wher
 Save the imputations.
 
 ```{r}
-save(imp_merged, file = file.path(dat_dir, "imp_merged.rda"))
+save(imp_merged, file = file.path(dat_dir, "imp_merged_tdia_30_blocked.rda"))
 ```
 
 ```{r}
-load(file.path(dat_dir, "imp_merged.rda"))
+load(file.path(dat_dir, "imp_merged_tdia_30_blocked.rda"))
 ```
 
 # Multilevel imputation
 
-The subjects form structure in our data, a.k.a. clusters. Using single-level method for multiple imputation "can be more hazardous than listwise deletion", so we should think about multilevel methods. These multilevel methods often involve mixed-effects imputation models. I reckon that fitting such models for every incomplete variable in our data set would be very computationally expensive (but I might want to double check that assumption), so it might be best to pick a couple of 'important' variables that have to be imputed with multilevel methods. But let's first check what happens if I use a multilevel (generalized) linear mixed effects + PMM imputation model for all variables.
+The subjects form structure in our data, a.k.a. clusters. Using single-level methods for multiple imputation "can be more hazardous than listwise deletion", so we should think about multilevel methods. These multilevel methods often involve mixed-effects imputation models. I at first thought that fitting mixed models for every variable in the data set would be very computationally expensive, but apparently it's not that bad. We are using linear mixed effects + PMM imputation models for all variables.
 
 To do so, we have to modify the predictor matrix.
 
@@ -252,18 +302,85 @@ qpred_multi["subject", "subject"] <- 0 # subject itself does not need to be impu
 qpred_multi[qpred_multi == 1] <- 3 # + covariate's cluster mean
 ```
 
+Instead of global mean-centering/scaling, we could also do subject-specific mean-centering/scaling. This might combat issues such as that certain persons don't ever use the extreme ends of a Likert scale, while some other do.
+
 ```{r}
-should.rescale <- sapply(dat_reg, typeof) == "double"
+sub_scaling <- TRUE
 
-dat_reg_scaled <- dat_reg
-dat_reg_scaled[,should.rescale] <- scale(dat_reg_scaled[,should.rescale],
-                                         scale = FALSE)
+if (sub_scaling) {
+  sub_centers <- dat_reg %>%
+    group_by(subject) %>%
+    summarize(across(c(where(is.double), totalKeyPresses), 
+                     ~ attr(scale(.x), "scaled:center")))
+  
+  sub_scales <- dat_reg %>%
+    group_by(subject) %>%
+    summarize(across(c(where(is.double), totalKeyPresses), 
+                     ~ attr(scale(.x), "scaled:scale")))
+  
+  save(sub_centers, sub_scales, 
+       file = file.path(dat_dir, "sub_centers_scales.rda"))
+  
+  dat_reg_scaled <- dat_reg %>%
+    group_by(subject) %>%
+    mutate(across(c(where(is.double), totalKeyPresses),
+                  function (x) {
+                    sub <- cur_group()[[1]][[1]]
+                    center <- sub_centers[sub_centers$subject == sub, cur_column()][[1]]
+                    scale <- sub_scales[sub_scales$subject == sub, cur_column()][[1]]
+                    
+                    # If scale is nearly 0, then don't do anything
+                    if (scale < 1e-10) {
+                      return(x)
+                    }
+                    
+                    # (x - center) / scale
+                    x / scale
+                  }),
+           subject = as.integer(subject)) %>%
+    ungroup() %>%
+    mutate(across(c(where(is.double), totalKeyPresses), ~ .x - mean(.x, na.rm = TRUE)))
+} else {
+  should.rescale <- sapply(dat_reg, typeof) == "double"
+  should.rescale["totalKeyPresses"] <- TRUE
+  
+  scaled <- scale(dat_reg[,should.rescale])
+  centers <- attr(scaled, "scaled:center")
+  scales <- attr(scaled, "scaled:scale")
+  save(centers, scales, file = file.path(dat_dir, "dat_reg_scales_tdia_30_blocked.rda"))
+  
+  dat_reg_scaled <- dat_reg
+  dat_reg_scaled[,should.rescale] <- scaled
+  
+  dat_reg_scaled$subject <- as.integer(dat_reg_scaled$subject)
+}
 
-dat_reg_scaled$subject <- as.integer(dat_reg_scaled$subject)
+dat_reg_scaled
 ```
 
 ```{r}
-n_threads <- 7
+max.print <- options("max.print")$max.print
+options(max.print = 10 * max.print)
+
+tab1 <- CreateTableOne(data = dat_reg_scaled)
+print(summary(tab1))
+
+options(max.print = max.print)
+```
+
+```{r}
+max.print <- options("max.print")$max.print
+options(max.print = 10 * max.print)
+
+tab1 <- CreateTableOne(data = dat_reg_scaled)
+print(summary(tab1))
+
+options(max.print = max.print)
+```
+
+
+```{r}
+n_threads <- 10
 
 cl <- makeCluster(n_threads)
 clusterSetRNGStream(cl, NULL) # Make sure every node uses a different RNG stream
@@ -278,6 +395,7 @@ imp_pars <- parLapply(cl, 1:n_threads, function(x) {
        m = 5, 
        predictorMatrix = qpred_multi, 
        method = "2l.pmm",
+       ridge = 0.001,
        printFlag = TRUE)
 })
 
@@ -285,6 +403,17 @@ print(Sys.time() - start)
 
 stopCluster(cl)
 ```
+
+```{r}
+mice(dat_reg_scaled, 
+       m = 5, 
+       predictorMatrix = qpred_multi, 
+       method = "2l.pmm",
+       ridge = 0.001,
+       printFlag = TRUE)
+```
+
+
 
 The mixed models complain a bit for firstdayofperiod and wantedNSSI, but their imputed densities seem fine (see below), so I will leave those models as-is.
 
@@ -295,6 +424,10 @@ for (i in 2:length(imp_pars)) {
 }
 ```
 
+```{r}
+imp_multi$loggedEvents
+```
+
 
 ```{r}
 mice::bwplot(imp_multi, mean_accuracy)
@@ -302,28 +435,49 @@ mice::bwplot(imp_multi, mean_accuracy)
 
 ```{r fig.height=10, fig.width=10}
 densityplot(imp_merged, ~ mean_accuracy)
+densityplot(imp_multi, ~ mean_accuracy)
 ```
 
 ```{r fig.height=10, fig.width=10}
 densityplot(imp_multi, ~ mean_accuracy + numdrinks_yest)
 ```
 
+```{r}
+cols <- colnames(dat_reg)
+ds <- vector("list", length(cols) - 1)
+
+pb <- txtProgressBar(max = length(ds), style = 3)
+
+for (i in 2:length(cols)) {
+  ds[[i - 1]] <- densityplot(imp_multi, as.formula(str_glue("~ {cols[i]}")))
+  setTxtProgressBar(pb, i-1)
+}
+
+close(pb)
+```
+
 ```{r fig.height=10, fig.width=20}
-xyplot(imp_merged, numdrinks_yest ~ ps | as.factor(.imp),
+g <- ggarrange(plotlist = ds)
+ggsave("images/imputation/imp_multilevel_morebiaffect.png", g, 
+       width = 2*1920, height = 2*1080, units = "px", dpi = 100)
+```
+
+```{r fig.height=10, fig.width=20}
+ps <- get_propensity(imp_multi)
+xyplot(imp_multi, numdrinks_yest ~ ps | as.factor(.imp),
        xlab = "Probability that record is incomplete",
        ylab = "Number of drinks yesterday", pch = c(1, 19), col = mdc(1:2))
 ```
 
 ```{r}
-save(imp_multi, file = file.path(dat_dir, "imp_multi.rda"))
+save(imp_multi, file = file.path(dat_dir, "imp_multi_tdia_30_blocked.rda"))
 ```
 
 ```{r}
-load(file.path(dat_dir, "imp_multi.rda"))
+load(file.path(dat_dir, "imp_multi_tdia_30_blocked.rda"))
 ```
 
 ```{r fig.height=10}
-ps <- get_propensity(imp_multi)
 xyplot(imp_multi, mean_accuracy ~ ps | as.factor(.imp),
        xlab = "Probability that record is incomplete",
        ylab = "Mean TDIA (scaled)", pch = c(1, 19), col = mdc(1:2))
