@@ -1,10 +1,308 @@
+# Loads key presses and sessions, filters out subjects with <30 days of data
+load_subject_key_data <- function(dat_dir, load_kp = TRUE, min_days = 30) {
+  dirs <- list.dirs(dat_dir)
+  
+  pattern <- "sub-([0-9]+)/preproc$"
+  preproc_paths <- str_subset(dirs, pattern)
+  subjects <- str_match(preproc_paths, pattern)[,2]
+  
+  # Vector of indices for all eligible subjects
+  sub_idx <- 1:length(subjects)
+  
+  # Loading dats_kp can take a while over Wi-Fi, so that's why it's optional
+  dats_kp <- NULL
+  if (load_kp) {
+    load(file.path(dat_dir, "dats_kp.rda"))
+  }
+  
+  load(file.path(dat_dir, "dats_ses.rda"))
+  
+  for (i in sub_idx) {
+    if (n_distinct(dats_ses[[i]]$date) < min_days) {
+      # Remove subject index
+      sub_idx <- sub_idx[sub_idx != i]
+    }
+  }
+  
+  subjects <- subjects[sub_idx]
+  dats_kp <- dats_kp[sub_idx]
+  dats_ses <- dats_ses[sub_idx]
+  
+  list(subjects = subjects, dats_kp = dats_kp, dats_ses = dats_ses)
+}
+
+# Get x and y breaks of the 2D histogram of all data
+calc_breaks <- function(dats_kp) {
+  n_sub <- length(dats_kp)
+  
+  dists <- vector(mode = "list", n_sub)
+  ikds <- vector(mode = "list", n_sub)
+  
+  for (i in 1:n_sub) {
+    dat_kp <- dats_kp[[i]]
+    
+    dat_kp_alphanum <- dat_kp %>%
+      filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+    
+    dists[[i]] <- dat_kp_alphanum$distanceFromPrevious
+    ikds[[i]] <- dat_kp_alphanum$IKD
+  }
+  
+  ls <- bin2d(unlist(dists), unlist(ikds), xBins = 100, yBins = 100)
+  
+  list(xBreaks = ls$xBreaks, yBreaks = ls$yBreaks)
+}
+
+# Calculate histogram matrix per day
+calc_partitions <- function(dats_kp, breaks) {
+  n_sub <- length(dats_kp)
+  
+  # List of partition data frames for all subjects
+  subject_partitions <- vector("list", n_sub)
+  
+  for (i in 1:n_sub) {
+    dat_kp <- dats_kp[[i]]
+    
+    dat_kp_alphanum <- dat_kp %>%
+      filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+    
+    dat_kp_alphanum <- dat_kp_alphanum %>%
+      mutate(date = date(keypressTimestampLocal))
+    n_days <- n_distinct(dat_kp_alphanum$date)
+    
+    subject_partitions[[i]] <- dat_kp_alphanum %>%
+      group_by(date) %>%
+      nest() %>%
+      mutate(
+        numberOfKeyPresses = nrow(data[[1]]),
+        hist = map(data, function(df) {
+          binCounts(df$distanceFromPrevious, 
+                    df$IKD, 
+                    breaks$xBreaks, 
+                    breaks$yBreaks)
+        })
+      )
+  }
+  
+  subject_mats <- lapply(subject_partitions, function(df) df$hist)
+  
+  subject_mats
+}
+
+# Compound loading and calculating histograms
+get_partitions <- function(dat_dir) {
+  dat <- load_subject_key_data(dat_dir)
+  breaks <- calc_breaks(dat$dats_kp)
+  subject_mats <- calc_partitions(dat$dats_kp, breaks)
+  
+  list(subject_mats = subject_mats, breaks = breaks, dat = dat)
+}
+
+# Load and create summary measures of the TDIAs
+summarize_tdias <- function(file, n_parts, permuted = FALSE, julia = FALSE) {
+  if (julia) {
+    ls <- parse_tdia_jld(file)
+    tdias <- ls$tdias
+    sampled_idx <- ls$sampled_idx
+  } else {
+    # Loads a list, inaptly named `tdias`
+    load(file)
+    
+    sampled_idx <- tdias[2,]
+    # List [10000] of n_sub*n_parts matrix
+    tdias <- tdias[1,]
+    # [n_sub*n_parts]*10000, where every n_parts rows belong to one subject
+    tdias <- sapply(tdias, function(x) as.vector(t(x)))
+  }
+  
+  iter_means <- data.frame(
+    iter_mean = colMeans(tdias),
+    permuted = permuted
+  )
+  
+  # Mostly used for later summary calculations
+  tdia_df <- data.frame(
+    subject = rep(1:(dim(tdias)[1]/n_parts), each = n_parts), 
+    tdias
+  )
+  
+  # Mean variance within subjects, between partitions, across iterations
+  sub_var <- tdia_df %>%
+    group_by(subject) %>%
+    summarize(
+      across(X1:X10000, var) # column-wise
+    ) %>%
+    rowwise() %>%
+    summarize(
+      variance = mean(c_across(X1:X10000))
+    ) %>%
+    mutate(subject = 1:n())
+  
+  # Mean TDIA within subjects, first across partitions, then iterations
+  sub_tdia <- tdia_df %>%
+    group_by(subject) %>%
+    summarize(
+      across(X1:X10000, mean) # column-wise
+    ) %>%
+    rowwise() %>%
+    mutate(
+      average = mean(c_across(X1:X10000))
+    ) %>%
+    relocate(average, .before = X1)
+  
+  # To be joined to tdia_df
+  n_iter <- length(sampled_idx)
+  n_sub <- length(sampled_idx[[1]])
+  n_parts <- length(sampled_idx[[1]][[1]])
+  idx_df <- data.frame(
+    iteration = rep(1:n_iter, each = n_sub*n_parts),
+    subject = rep(1:n_sub, each = n_parts, times = n_iter),
+    partition_order = rep(1:n_parts, times = n_iter*n_sub),
+    partition_idx = unlist(sampled_idx)
+  )
+  
+  # Get TDIAs per original partition index
+  partition_df <- tdia_df %>% 
+    pivot_longer(starts_with("X"), 
+                 names_to = "iteration", 
+                 names_prefix = "X",
+                 values_to = "accuracy") %>%
+    mutate(
+      iteration = as.integer(iteration),
+      partition_order = rep(1:n_parts, each = n_iter, times = n_sub)
+    ) %>%
+    arrange(iteration) %>%
+    inner_join(idx_df, by = c("iteration", "subject", "partition_order")) %>%
+    relocate(iteration, .before = subject) %>%
+    relocate(accuracy, .after = partition_idx) %>%
+    group_by(subject, partition_idx) %>%
+    mutate(mean_accuracy = mean(accuracy)) %>%
+    ungroup()
+  
+  list(
+    tdias = tdias,
+    sampled_idx = sampled_idx,
+    iter_means = iter_means,
+    sub_var = sub_var,
+    sub_tdia = sub_tdia,
+    partition_df = partition_df
+  )
+}
+
+# Prints and returns some plots of the summary measures of a TDIA data set
+plot_tdia_summ <- function(summ, sub = NULL, subjects = NULL) {
+  gs <- vector("list", length = 3)
+  
+  gs[[1]] <- ggplot(summ$iter_means, aes(iter_mean)) +
+    geom_histogram() +
+    xlab("Mean TDIA") +
+    ylab("Count")
+  
+  gs[[2]] <- ggplot(melt(as.data.frame(summ$sub_tdia), 
+                         id.vars = c("subject", "average"), 
+                         variable_name = "partition"), 
+                    aes(subject)) +
+    geom_point(aes(y = value), color = alpha("coral1", alpha = 0.01)) +
+    geom_point(aes(y = average), color = "steelblue", size = 3) +
+    xlab("subject") +
+    ylab("Mean TDIA") +
+    ylim(0, 1) +
+    theme(text = element_text(size=15))
+  
+  if (!is.null(sub)) {
+    if (is.null(subjects)) {
+      stop("`subjects` must not be NULL when `sub` is not NULL")
+    }
+    
+    sub_idx <- which(subjects == sub)
+    
+    gs[[3]] <- ggplot(summ$partition_df %>% 
+                        filter(subject == sub_idx), 
+                      aes(partition_idx)) +
+      geom_point(aes(y = accuracy), color = "coral1", alpha = 0.01) +
+      geom_point(aes(y = mean_accuracy), color = "steelblue", size = 3) +
+      geom_line(aes(y = mean_accuracy), color = "steelblue") +
+      scale_x_continuous("Partition index") +
+      scale_y_continuous("TDIA", limits = c(0, 1)) +
+      ggtitle(str_glue("Subject {sub}")) +
+      theme_ipsum(base_size = 15, axis_title_size = 15)
+  }
+  
+  lapply(gs, print)
+  
+  gs
+}
+
+# Compares an unpermuted TDIA set with a permuted one, by plotting their 
+# histograms in one plot
+plot_tdia_comp <- function(summ, summ_perm, key = NULL, legend_title = "Permuted") {
+  summ$iter_means$key <- key[1:nrow(summ$iter_means)]
+  summ_perm$iter_means$key <- key[(nrow(summ$iter_means)+1):(2*nrow(summ_perm$iter_means))]
+  
+  iter_all_means <- rbind(summ$iter_means, summ_perm$iter_means)
+  
+  fill <- "permuted"
+  
+  if (!is.null(key)) {
+    fill <- "key"
+  }
+  
+  g <- ggplot(iter_all_means, aes(iter_mean, fill = .data[[fill]])) +
+    geom_histogram(data = summ$iter_means, 
+                   color="#e9ecef", bins = 100, alpha = 0.5) +
+    geom_histogram(data = summ_perm$iter_means, 
+                   color="#e9ecef", bins = 100, alpha = 0.5) +
+    xlab("Mean TDIA") +
+    ylab("Count") +
+    guides(fill = guide_legend(legend_title, reverse = T)) +
+    scale_fill_ipsum() +
+    theme_ipsum(base_size = 15, axis_title_size = 15)
+  
+  print(g)
+  
+  g
+}
+
+# Parse Julia's JLD TDIA files
+parse_tdia_jld <- function(path) {
+  h5f <- H5Fopen(path)
+  
+  # n_sub X n_parts X n_iter
+  tdias <- h5f$tdias
+  
+  # n_parts X n_sub X n_iter
+  tdias <- aperm(tdias, c(2, 1, 3))
+  
+  ds <- dim(tdias)
+  # [n_sub*n_parts] X n_iter, where the first n_parts rows are from the same
+  # subject
+  dim(tdias) <- c(ds[1] * ds[2], ds[3])
+  
+  # [n_sub*n_iter] X n_parts, where the first n_iter rows are from the same
+  # subject
+  sampled_idx <- h5f$sampled_idx
+  
+  # Convert sampled_idx to a list of lists of vectors (n_iter X n_sub X n_parts)
+  iter_labels <- rep(1:n_iter, times = n_sub * n_parts)
+  sampled_idx <- split(sampled_idx, iter_labels)
+  
+  sub_labels <- rep(1:n_sub, times = n_parts)
+  sampled_idx <- lapply(sampled_idx, split, sub_labels)
+  
+  # n_sub X n_sub
+  conf_mat <- drop(h5f$conf_mat)
+  
+  H5Fclose(h5f)
+  
+  list(tdias = tdias, sampled_idx = sampled_idx, conf_mat = conf_mat)
+}
+
 # We have to:
 #   
 # * Compute the average TDIA per subject and per partition day. For that, we 
 #   first need to relate all `n_parts` partitions of a subject in an iteration 
 #   to that subject's day index.
 # * Relate every partition back to a date.
-
 link_tdia_date <- function(tdias, subjects, dats_kp) {
   
   ## Unpack and label TDIA data
@@ -18,7 +316,7 @@ link_tdia_date <- function(tdias, subjects, dats_kp) {
   
   # Every column represents an iteration, every row a (sampled) partition of a 
   # subject
-  n_parts <- 10
+  n_parts <- length(sampled_idx[[1]][[1]])
   tdia_df <- data.frame(
     subject = rep(1:(dim(tdias)[1]/n_parts), each = n_parts), 
     tdias
@@ -29,7 +327,6 @@ link_tdia_date <- function(tdias, subjects, dats_kp) {
   
   n_iter <- length(sampled_idx)
   n_sub <- length(sampled_idx[[1]])
-  n_parts <- length(sampled_idx[[1]][[1]])
   idx_df <- data.frame(
     iteration = rep(1:n_iter, each = n_sub*n_parts),
     subject = rep(1:n_sub, each = n_parts, times = n_iter),
