@@ -28,78 +28,27 @@ source("src/load_dependencies.R")
 ```
 
 ```{r}
-dirs <- list.dirs(dat_dir)
+ls <- get_partitions(dat_dir)
 
-pattern <- "sub-([0-9]+)/preproc$"
-preproc_paths <- str_subset(dirs, pattern)
-subjects <- str_match(preproc_paths, pattern)[,2]
+subjects <- ls$dat$subjects
+dats_kp <- ls$dat$dats_kp
+dats_ses <- ls$dat$dats_ses
+xBreaks <- ls$breaks$xBreaks
+yBreaks <- ls$breaks$yBreaks
+subject_mats <- ls$subject_mats
 ```
+
+In case I don't want to load the key press data itself (can take quite long over Wi-Fi).
 
 ```{r}
-# Vector of indices for all eligible subjects
-sub_idx <- 1:length(subjects)
-
-load(file.path(dat_dir, "dats_kp.rda"))
-load(file.path(dat_dir, "dats_ses.rda"))
-
-for (i in sub_idx) {
-  if (n_distinct(dats_ses[[i]]$date) < 30) {
-    # Remove subject index
-    sub_idx <- sub_idx[sub_idx != i]
-  }
-}
-
-subjects <- subjects[sub_idx]
-dats_kp <- dats_kp[sub_idx]
-dats_ses <- dats_ses[sub_idx]
+ls <- load_subject_key_data(dat_dir, load_kp = FALSE)
+subjects <- ls$subjects
 ```
 
-
-```{r}
-dists <- vector(mode = "list", length(subjects))
-ikds <- vector(mode = "list", length(subjects))
-
-for (i in 1:length(subjects)) {
-  sub <- subjects[i]
-  print(str_glue("Working on subject {sub}"))
-  
-  dat_kp <- dats_kp[[i]]
-  
-  dat_kp_alphanum <- dat_kp %>%
-    filter(keypress_type == "alphanum", previousKeyType == "alphanum")
-  
-  dists[[i]] <- dat_kp_alphanum$distanceFromPrevious
-  ikds[[i]] <- dat_kp_alphanum$IKD
-}
-```
-
-Get breaks that will cover the entire range of data:
-
-```{r}
-ls <- bin2d(unlist(dists), unlist(ikds), xBins = 100, yBins = 100)
-xBreaks <- ls$xBreaks
-yBreaks <- ls$yBreaks
-```
-
-
-```{r fig.height=10}
-df <- ls[[1]]
-df <- rownames_to_column(df, "x")
-df <- melt(df, id.vars = "x", variable_name = "y")
-df$x <- factor(df$x)
-
-ggplot(df) +
-  geom_raster(aes(x, y, fill = value)) +
-  theme(text = element_text(size=12),
-        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-
-ggplot(df) +
-  geom_raster(aes(x, y, fill = log(value))) +
-  theme(text = element_text(size=12),
-        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-```
 
 # Between-subjects fingerprinting
+
+Note: This section is unlikely to work (since `dists` and `ikds` are currently calculated elsewhere), but is kept here for archival purposes.
 
 ```{r}
 predict <- function(xHists, yHists) {
@@ -757,165 +706,24 @@ bm <- microbenchmark(subsampled_tdia(subject_mats, n_parts), times = 10)
 bm
 ```
 
-### Examining bootstrapped tdias
+# Examining bootstrapped tdias
 
 ```{r}
-load(file.path(dat_dir, "tdias.rda"))
+tdias_10_summ <- summarize_tdias(file.path(dat_dir, "tdias.rda"), n_parts = 10)
 ```
-
-```{r}
-sampled_idx <- tdias[2,]
-# List [10000] of n_sub*n_parts matrix
-tdias <- tdias[1,]
-# [n_sub*n_parts]*10000, where every n_parts rows belong to one subject
-tdias <- sapply(tdias, function(x) as.vector(t(x)))
-```
-
-
-Almost perfectly normal (central limit theorem):
-
-```{r}
-iter_means <- data.frame(
-  iter_mean = colMeans(tdias),
-  permuted = FALSE
-)
-
-ggplot(iter_means, aes(iter_mean)) +
-  geom_histogram() +
-  xlab("Mean TDIA") +
-  ylab("Count")
-
-# ggsave("~/Documents/Autocorrelation/images/bootstrap_tdia_iter_hist.png")
-```
-
-
-```{r}
-n_parts <- 10
-tdia_df <- data.frame(
-  subject = rep(1:(dim(tdias)[1]/n_parts), each = n_parts), 
-  tdias
-)
-
-tdia_df
-```
-
-```{r}
-sub_var <- tdia_df %>%
-  group_by(subject) %>%
-  summarize(
-    across(X1:X10000, var)
-  ) %>%
-  rowwise() %>%
-  summarize(
-    variance = mean(c_across(X1:X10000))
-  ) %>%
-  mutate(subject = 1:n())
-
-sub_var
-```
-
-
-```{r}
-sub_tdia <- tdia_df %>%
-  group_by(subject) %>%
-  summarize(
-    across(X1:X10000, mean)
-  ) %>%
-  rowwise() %>%
-  mutate(
-    average = mean(c_across(X1:X10000))
-  ) %>%
-  relocate(average, .before = X1)
-
-sub_tdia
-```
-
-```{r}
-melted_tdia <- melt(as.data.frame(sub_tdia), 
-     id.vars = c("subject", "average"), variable_name = "partition")
-```
-
 
 ```{r fig.height=8}
-ggplot(melted_tdia, aes(subject)) +
-  geom_point(aes(y = value), color = alpha("coral1", alpha = 0.01)) +
-  geom_point(aes(y = average), color = "steelblue", size = 3) +
-  xlab("subject") +
-  ylab("Mean TDIA") +
-  ylim(0, 1) +
-  theme(text = element_text(size=15))
+sub <- 3100
+gs <- plot_tdia_summ(tdias_10_summ, sub)
 
-ggsave("images/bootstrap_tdia_per_subject.png",
-       dpi = 100)
+ggsave("images/test_tdia/bootstrap_tdia_10_iter_hist.png", gs[[1]], 
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave("images/test_tdia/bootstrap_tdia_10_per_subject.png", gs[[2]], 
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_10_over_partition_sub_{sub}.png"),
+       gs[[3]], dpi = 150, height = 750, width = 1750, units = "px")
 ```
 
-```{r}
-tdia_df
-```
-
-```{r}
-tdia_df %>%
-  mutate(partition = rep(1:n_parts, n_sub)) %>%
-  relocate(partition, .before = X1) %>%
-  rowwise() %>%
-  mutate(
-    average = mean(c_across(X1:X10000))
-  ) %>%
-  relocate(average, .before = X1)
-```
-
-```{r}
-# unlist gets you a vector where every n_parts entries are from one subject,
-# and every n_sub*n_parts entries are from one iteration.
-
-n_iter <- length(sampled_idx)
-n_sub <- length(sampled_idx[[1]])
-n_parts <- length(sampled_idx[[1]][[1]])
-idx_df <- data.frame(
-  iteration = rep(1:n_iter, each = n_sub*n_parts),
-  subject = rep(1:n_sub, each = n_parts, times = n_iter),
-  partition_order = rep(1:n_parts, times = n_iter*n_sub),
-  partition_idx = unlist(sampled_idx)
-)
-
-idx_df
-```
-
-```{r}
-partition_df <- tdia_df %>% 
-  pivot_longer(starts_with("X"), 
-               names_to = "iteration", 
-               names_prefix = "X",
-               values_to = "accuracy") %>%
-  mutate(
-    iteration = as.integer(iteration),
-    partition_order = rep(1:n_parts, each = n_iter, times = n_sub)
-  ) %>%
-  arrange(iteration) %>%
-  inner_join(idx_df, by = c("iteration", "subject", "partition_order")) %>%
-  relocate(iteration, .before = subject) %>%
-  relocate(accuracy, .after = partition_idx) %>%
-  group_by(subject, partition_idx) %>%
-  mutate(mean_accuracy = mean(accuracy)) %>%
-  ungroup()
-
-partition_df
-```
-
-```{r fig.height=8, fig.width=18}
-sub <- 7
-
-ggplot(partition_df %>% filter(subject == sub), aes(partition_idx)) +
-  geom_point(aes(y = accuracy), color = "coral1", alpha = 0.01) +
-  geom_point(aes(y = mean_accuracy), color = "steelblue", size = 3) +
-  geom_line(aes(y = mean_accuracy), color = "steelblue") +
-  scale_x_continuous("Partition index") +
-  scale_y_continuous("TDIA") +
-  ggtitle(str_glue("Subject {sub}")) +
-  theme_ipsum(base_size = 15, axis_title_size = 15)
-
-# ggsave(str_glue("images/bootstrap_tdia_over_partition_sub_{sub}.png"))
-```
 
 ```{r}
 acc_n_iter <- partition_df %>%
@@ -944,7 +752,7 @@ ggplot(acc_n_iter) +
 ```
 
 ```{r}
-# Bit of a lazy way to determine how many data each subject is, relies on the
+# Bit of a lazy way to determine how many data each subject has, relies on the
 # fact that there is uniform sampling and enough samples
 acc_var_n_parts <- acc_n_iter %>%
   summarize(n_parts = max(partition_idx)) %>%
@@ -960,7 +768,7 @@ ggplot(acc_var_n_parts, aes(n_parts, average)) +
   ylim(0, 1) +
   theme_ipsum(base_size = 15, axis_title_size = 15)
 
-ggsave("images/bootstrap_scatter_tdia_nData.png")
+# ggsave("images/bootstrap_scatter_tdia_nData.png")
 ```
 
 
@@ -972,84 +780,30 @@ ggplot(acc_var_n_parts, aes(average, variance)) +
   xlim(0, 1) +
   theme_ipsum(base_size = 15, axis_title_size = 15)
 
-ggsave("images/bootstrap_scatter_tdia_variance.png")
+# ggsave("images/bootstrap_scatter_tdia_variance.png")
 ```
 
 
-#### Permuted
+## Permuted
 
 ```{r}
-n_parts <- 10
-```
-
-```{r}
-load(file.path(dat_dir, "tdias_permuted_blocked2.rda"))
-```
-
-```{r}
-# List [10000] of n_sub*n_parts matrix
-perm_tdias <- tdias[1,]
-# [n_sub*n_parts]*10000, where every n_parts rows belong to one subject
-perm_tdias <- sapply(perm_tdias, function(x) as.vector(t(x)))
-```
-
-```{r}
-iter_perm_means <- data.frame(
-  iter_mean = colMeans(perm_tdias),
-  permuted = TRUE
-)
-
-ggplot(iter_perm_means, aes(iter_mean)) +
-  geom_histogram() +
-  xlab("Mean TDIA") +
-  ylab("Count")
+tdias_10_perm_summ <- summarize_tdias(file.path(dat_dir, "tdias_permuted.rda"), 
+                                      n_parts = 10, permuted = TRUE)
 ```
 
 ```{r fig.height=8}
-perm_tdia_df <- data.frame(
-  subject = rep(1:(dim(perm_tdias)[1]/n_parts), each = n_parts), 
-  perm_tdias
-)
+gs <- plot_tdia_summ(tdias_10_perm_summ, 3100)
 
-sub_perm_tdia <- perm_tdia_df %>%
-  group_by(subject) %>%
-  summarize(
-    across(X1:X10000, mean)
-  ) %>%
-  rowwise() %>%
-  mutate(
-    average = mean(c_across(X1:X10000))
-  ) %>%
-  relocate(average, .before = X1)
-
-melted_perm_tdia <- melt(as.data.frame(sub_perm_tdia), 
-     id.vars = c("subject", "average"), variable_name = "partition")
-
-ggplot(melted_perm_tdia, aes(subject)) +
-  geom_point(aes(y = value), color = alpha("coral1", alpha = 0.01)) +
-  geom_point(aes(y = average), color = "steelblue", size = 3) +
-  xlab("subject") +
-  ylab("Mean TDIA") +
-  ylim(0, 1) +
-  theme(text = element_text(size=15))
-
-ggsave("images/permuted_tdia_per_subject_blocked_0.png",
-       dpi = 100)
+ggsave("images/test_tdia/bootstrap_tdia_10_perm_iter_hist.png", gs[[1]])
+ggsave("images/test_tdia/bootstrap_tdia_10_perm_per_subject.png", gs[[2]], 
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_10_perm_over_partition_sub_{sub}.png"),
+       gs[[3]])
 ```
 
 ```{r fig.height=8}
-iter_all_means <- rbind(iter_means, iter_perm_means)
-
-ggplot(iter_all_means, aes(iter_mean, fill = permuted)) +
-  geom_histogram(data = iter_means, color="#e9ecef", bins = 100, alpha = 0.5) +
-  geom_histogram(data = iter_perm_means, color="#e9ecef", bins = 100, alpha = 0.5) +
-  xlab("Mean TDIA") +
-  ylab("Count") +
-  guides(fill = guide_legend("Permuted", reverse = T)) +
-  scale_fill_ipsum() +
-  theme_ipsum(base_size = 15, axis_title_size = 15)
-
-# ggsave("images/permuted_tdia_hist.png")
+g <- plot_tdia_comp(tdias_10_summ, tdias_10_perm_summ)
+ggsave("images/test_tdia/tdia_10_no-perm_vs_perm_hist.png", g)
 ```
 
 ```{r fig.height=10, fig.width=20}
@@ -1064,10 +818,127 @@ ggplot(melted_all, aes(value, fill = permuted)) +
   facet_wrap(vars(subject))
 ```
 
-
 Mean is very close to expected mean of (n_parts - 1) / (n_sub * n_parts - 1) = 0.01768173.
 
 ```{r}
 mean(iter_perm_means$iter_mean)
 ```
 
+## Blocked
+
+```{r}
+tdias_10_blocked_summ <- summarize_tdias(file.path(dat_dir, "tdias_10_blocked.rda"), 
+                                         n_parts = 10)
+```
+
+```{r fig.height=8}
+gs <- plot_tdia_summ(tdias_10_blocked_summ, 3100)
+
+ggsave("images/test_tdia/bootstrap_tdia_10_blocked_iter_hist.png", gs[[1]], 
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave("images/test_tdia/bootstrap_tdia_10_blocked_per_subject.png", gs[[2]], 
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_10_blocked_over_partition_sub_{sub}.png"),
+       gs[[3]], dpi = 150, height = 750, width = 1750, units = "px")
+```
+
+```{r}
+blocked <- rep(c(FALSE, TRUE), each = nrow(tdias_10_summ$iter_means))
+g <- plot_tdia_comp(tdias_10_summ, tdias_10_blocked_summ, blocked, "Blocked")
+ggsave("images/test_tdia/bootstrap_tdia_10_individual-vs-blocked.png", g,
+       dpi = 150, height = 1250, width = 1750, units = "px")
+```
+
+```{r}
+tdias_10_summ$iter_means %>%
+  add_column(!!column := 3)
+```
+
+
+## 30 partitions - Blocked
+
+```{r}
+tdias_30_blocked_summ <- summarize_tdias(file.path(dat_dir, "tdias_30_blocked.rda"), 
+                                         n_parts = 30)
+```
+
+```{r fig.height=8}
+gs <- plot_tdia_summ(tdias_30_blocked_summ, 3100, subjects)
+
+# ggsave("images/test_tdia/bootstrap_tdia_30_blocked_iter_hist.png", gs[[1]], 
+#        dpi = 150, height = 1500, width = 1250, units = "px")
+# ggsave("images/test_tdia/bootstrap_tdia_30_blocked_per_subject.png", gs[[2]], 
+#        dpi = 150, height = 1500, width = 1250, units = "px")
+# ggsave(str_glue("images/test_tdia/bootstrap_tdia_30_blocked_over_partition_sub_{sub}.png"),
+#        gs[[3]], dpi = 150, height = 750, width = 1750, units = "px")
+```
+
+```{r}
+n_partitions <- rep(c("10", "30"), each = nrow(tdias_10_blocked_summ$iter_means))
+g <- plot_tdia_comp(tdias_10_blocked_summ, tdias_30_blocked_summ, n_partitions, 
+                    "Number of partitions")
+ggsave("images/test_tdia/bootstrap_tdia_10-vs-30_blocked.png", g,
+       dpi = 150, height = 1250, width = 1750, units = "px")
+```
+
+## 10 partitions - Blocked - Permuted
+
+```{r}
+tdias_10_blocked_perm_summ <- summarize_tdias(file.path(
+                                                dat_dir, 
+                                                "tdias_permuted_between.rda"
+                                              ), 
+                                              n_parts = 10,
+                                              permuted = TRUE)
+```
+
+```{r fig.height=8}
+gs <- plot_tdia_summ(tdias_10_blocked_perm_summ, 3100)
+
+ggsave("images/test_tdia/bootstrap_tdia_10_blocked_perm_iter_hist.png", gs[[1]])
+ggsave("images/test_tdia/bootstrap_tdia_10_blocked_perm_per_subject.png", gs[[2]], dpi = 100)
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_10_blocked_perm_over_partition_sub_{sub}.png"),
+       gs[[3]])
+```
+
+## 30 partitions - Blocked - Permuted
+
+```{r}
+tdias_30_blocked_perm_summ <- summarize_tdias(file.path(
+                                                dat_dir, 
+                                                "tdias_30_permuted_blocked.rda"
+                                              ), 
+                                              n_parts = 30,
+                                              permuted = TRUE)
+```
+
+```{r fig.height=8}
+gs <- plot_tdia_summ(tdias_30_blocked_perm_summ, sub)
+
+ggsave("images/test_tdia/bootstrap_tdia_30_blocked_perm_iter_hist.png", gs[[1]],
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave("images/test_tdia/bootstrap_tdia_30_blocked_perm_per_subject.png", gs[[2]], 
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_30_blocked_perm_over_partition_sub_{sub}.png"),
+       gs[[3]], dpi = 150, height = 750, width = 1750, units = "px")
+```
+
+```{r fig.height=8}
+g <- plot_tdia_comp(tdias_30_blocked_summ, tdias_30_blocked_perm_summ)
+ggsave("images/test_tdia/bootstrap_tdia_30_blocked_perm-vs-no-perm_hist.png", g,
+       dpi = 150, height = 1250, width = 1750, units = "px")
+```
+
+## Julia - 30 partitions - Blocked
+
+```{r}
+tdias_julia_30_blocked_summ <- summarize_tdias(file.path(
+                                                 dat_dir, 
+                                                 "tdias_flattened.jld"
+                                               ), 
+                                               n_parts = 30, julia = TRUE)
+```
+
+```{r fig.height=8}
+gs <- plot_tdia_summ(tdias_julia_30_blocked_summ, 3100, subjects)
+```
