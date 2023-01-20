@@ -14,8 +14,9 @@ library(nlme)
 library(lme4)
 library(mice)
 library(miceadds)
-# library(mgcv)
-# library(itsadug)
+library(broom.mixed)
+library(ggpubr)
+library(rhdf5)
 
 # Set the filter function to dplyr's version
 filter <- dplyr::filter
