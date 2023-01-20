@@ -1,0 +1,255 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+local <- TRUE
+
+wd <- ""
+
+if (!local) {
+  # Cluster environment
+  wd <- "~/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
+} else {
+  wd <- "~/HPC/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "~/HPC_project/data"
+}
+
+# For some reason this sets the pwd only for the current scope, which means it 
+# does not affect anything outside an if block if you set it there.
+# So that's why it's here instead of above.
+setwd(wd) 
+
+source("src/load_dependencies.R")
+```
+
+```{r}
+load(file.path(dat_dir, "imputed_models.rda"))
+```
+
+```{r}
+pooled <- pool(imputed_models)
+pooled
+```
+
+```{r}
+summary(pooled)
+```
+
+Nothing significant...
+
+
+
+# Individual GLMs
+
+```{r}
+load(file.path(dat_dir, "imp_multi.rda"))
+load(file.path(dat_dir, "dat_reg.rda"))
+```
+
+```{r}
+mean_acc <- mean(dat_reg$mean_accuracy, na.rm = TRUE)
+
+# 35 rows, with a sub-data-frame (imputed data set) in column `data`
+all_imps <- mice::complete(imp_multi, "long") %>%
+  mutate(mean_accuracy = mean_accuracy + mean_acc) %>%
+  select(!NSSIyn) %>% # Sometimes only has 1 level, glm can't handle that
+  group_by(.imp, subject) %>%
+  nest()
+
+all_imps
+```
+
+```{r warning=FALSE}
+n_sub <- n_distinct(all_imps$subject)
+imp_models <- vector("list", n_sub)
+imp_pools <- vector("list", n_sub)
+imp_pool_summaries <- vector("list", n_sub)
+
+for (i in 1:n_sub) {
+  print(str_glue("Subject {i} out of {n_sub}"))
+  
+  sub_imp <- all_imps %>%
+    filter(subject == i)
+  
+  imp_models[[i]] <- sub_imp %>%
+    rowwise() %>%
+    mutate(model = list(glm(mean_accuracy ~ . - .id, 
+                            data = data, 
+                            family = "binomial")))
+  
+  imp_pools[[i]] <- pool(imp_models[[i]]$model)
+  imp_pool_summaries[[i]] <- summary(imp_pools[[i]])
+}
+```
+
+```{r}
+for (i in 1:n_sub) {
+  if (any(imp_pool_summaries[[i]]$p.value < 0.05, na.rm = TRUE)) {
+    print(str_glue("Subject {subjects[i]}"))
+    print(imp_pool_summaries[[i]])
+  }
+}
+```
+
+
+# numdrinks_yest
+
+```{r}
+load(file.path(dat_dir, "imp_multi.rda"))
+load(file.path(dat_dir, "dat_reg.rda"))
+```
+
+```{r}
+mean_numdrinks_yest <- mean(dat_reg$numdrinks_yest, na.rm = TRUE)
+```
+
+```{r}
+imp_models_ndrinks <- mice::complete(imp_multi, "long") %>%
+  mutate(numdrinks_yest = round(numdrinks_yest + mean_numdrinks_yest)) %>%
+  group_by(.imp) %>%
+  nest() %>%
+  rowwise() %>%
+  mutate(model = list(glmer(numdrinks_yest ~ mean_accuracy + (1 | subject), 
+                            data = data,
+                            family = "poisson")))
+
+imp_models_ndrinks
+```
+
+```{r}
+pooled_ndrinks <- pool(imp_models_ndrinks$model)
+pooled_ndrinks
+```
+
+```{r}
+summary(pooled_ndrinks)
+```
+
+# More BiAffect measures, global centering and scaling
+
+```{r}
+# About 7.8 GB, might be quicker to generate locally
+load(file.path(dat_dir, "imputed_models_tdia_30_blocked_centered_scaled.rda"))
+```
+
+```{r}
+all_pools <- imputed_models %>%
+  summarize(across(menstrualbleeding:n_stressors, ~ list(pool(.x))))
+
+all_pools
+```
+
+```{r}
+for (i in 1:ncol(all_pools)) {
+  summ <- summary(all_pools[[i]][[1]])
+  
+  if (any(summ$p.value <= 0.05)) {
+    print(colnames(all_pools)[i])
+    print(summ)
+    print("======================")
+  }
+}
+```
+
+
+# Affective instability with RMSSD
+
+```{r}
+load(file.path(dat_dir, "imp_multi_tdia_30_blocked.rda"))
+load(file.path(dat_dir, "dat_reg_scales_tdia_30_blocked.rda"))
+```
+
+```{r}
+cdat <- complete(imp_multi, 1)
+
+rmssd <- function(x) sqrt(mean(diff(x)^2))
+
+cdat %>%
+  group_by(subject) %>%
+  summarize(
+    tdia = mean(mean_accuracy),
+    across(menstrualbleeding:n_stressors, rmssd)
+  )
+```
+
+
+## Predict TDIA
+
+```{r}
+mean_acc <- centers["mean_accuracy"]
+
+imp_models_rmssd <- mice::complete(imp_multi, "long") %>%
+  select(!NSSIyn) %>%
+  group_by(.imp, subject) %>%
+  summarize(
+    tdia = mean(mean_accuracy + mean_acc),
+    across(menstrualbleeding:n_stressors, rmssd)
+  ) %>%
+  group_by(.imp) %>%
+  nest() %>%
+  rowwise() %>%
+  mutate(model = list(glm(tdia ~ SleepLNQuality,
+                          data = data,
+                          family = "binomial")))
+```
+
+```{r}
+pooled_rmssd <- pool(imp_models_rmssd$model)
+pooled_rmssd
+```
+
+```{r}
+summary(pooled_rmssd)
+```
+
+
+## Predict EMA instability
+
+```{r}
+mean_acc <- centers["mean_accuracy"]
+scale_acc <- scales["mean_accuracy"]
+
+imp_rmssd <- mice::complete(imp_multi, "long") %>%
+  select(!NSSIyn) %>%
+  group_by(.imp, subject) %>%
+  summarize(
+    tdia = mean(mean_accuracy * scale_acc + mean_acc),
+    across(menstrualbleeding:n_stressors, rmssd)
+  )
+
+imp_rmssd
+```
+
+```{r}
+imp_ema_rmssd_models <- imp_rmssd %>%
+  group_by(.imp) %>%
+  summarize(
+    across(menstrualbleeding:n_stressors, ~ list(lm(.x ~ tdia)))
+  )
+```
+
+```{r}
+imp_ema_rmssd_pooled <- imp_ema_rmssd_models %>%
+  ungroup() %>%
+  summarize(across(menstrualbleeding:n_stressors, ~ list(pool(.x))))
+
+imp_ema_rmssd_pooled
+```
+
+```{r}
+for (i in 1:ncol(imp_ema_rmssd_pooled)) {
+  summ <- summary(imp_ema_rmssd_pooled[[i]][[1]])
+  
+  if (any(summ$p.value <= 0.05)) {
+    print(colnames(imp_ema_rmssd_pooled)[i])
+    print(summ)
+    print("======================")
+  }
+}
+```
+
