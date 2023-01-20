@@ -175,18 +175,10 @@ options(max.print = max.print)
 
 # Join with TDIAs
 
-Temporarily add daterated back in to allow joining.
-
-```{r}
-# dat_rep_reg$daterated <- dat_rep_full$daterated
-# dat_rep_reg %>%
-#   relocate(daterated, .after = id)
-```
-
 Load TDIA data.
 
 ```{r}
-load(file.path(dat_dir, "tdias.rda"))
+load(file.path(dat_dir, "tdias_30_blocked.rda"))
 ```
 
 Load subject key press data.
@@ -236,6 +228,41 @@ dat_reg <- sub_tdia %>%
 dat_reg
 ```
 
+## Aggregate BiAffect measures per day
+
+```{r}
+# Get all subject session data, regardless of how many data they have
+ls <- load_subject_key_data(dat_dir, load_kp = FALSE, min_days = 0)
+
+names(ls$dats_ses) <- ls$subjects
+dat_ses <- bind_rows(ls$dats_ses, .id = "subject")
+
+dat_ses
+```
+
+```{r}
+dat_day <- dat_ses %>%
+  group_by(subject, date) %>%
+  summarize(
+    across(medianIKD:backspaceRate, mean),
+    totalKeyPresses = sum(totalKeyPresses),
+    across(active:bed, mean)
+  )
+
+dat_day
+```
+
+
+## Join BiAffect features with self-report measures based on date and subject
+
+```{r}
+dat_reg <- dat_day %>%
+  full_join(dat_reg, by = c("subject", "date"))
+
+dat_reg
+```
+
+
 ```{r warning=FALSE}
 max.print <- options("max.print")$max.print
 options(max.print = 10 * max.print)
@@ -253,7 +280,7 @@ sum(complete.cases(dat_reg))
 Save (unscaled) cleaned data to file.
 
 ```{r}
-save(dat_reg, file = file.path(dat_dir, "dat_reg.rda"))
+save(dat_reg, file = file.path(dat_dir, "dat_reg_tdia_30_blocked.rda"))
 ```
 
 Scaling continuous variables (except mean_accuracy and date).
@@ -602,6 +629,92 @@ scale <- cumsum(unlist(fixef(m1))) / shape
 
 x <- seq(1, 5, 0.01)
 plot(x, dgamma(x, shape, scale = scale[1]), type = "l")
+```
+
+
+
+
+
+
+# Analysis of multiply imputed data
+
+```{r}
+load(file.path(dat_dir, "imp_multi.rda"))
+load(file.path(dat_dir, "dat_reg.rda"))
+```
+
+The data of the multilevel imputations have been scaled (well, only de-meaned, really) to ease mixed imputation model estimation, but for the final, to-be-pooled models I would like at least mean_accuracy to be scaled back to its original scale.
+
+```{r}
+mean_acc <- mean(dat_reg$mean_accuracy, na.rm = TRUE)
+```
+
+```{r}
+comp <- mice::complete(imp_multi, 1) %>%
+  mutate(mean_accuracy = mean_accuracy + mean_acc)
+
+comp
+```
+
+```{r}
+start <- Sys.time()
+
+m1 <- glmer(mean_accuracy ~ . - subject + (1 | subject), 
+            data = comp,
+            family = "binomial")
+
+print(Sys.time() - start)
+
+summary(m1)
+```
+
+```{r}
+start <- Sys.time()
+
+m1_all <- allFit(m1)
+
+print(Sys.time() - start)
+
+summary(m1_all)
+```
+
+```{r}
+start <- Sys.time()
+
+m1_bobyqa <- glmer(mean_accuracy ~ . - subject + (1 | subject), 
+                   data = comp,
+                   family = "binomial",
+                   control = glmerControl("bobyqa",
+                                          optCtrl = list(
+                                            maxfun = 100 * ncol(comp)^2
+                                          )))
+
+print(Sys.time() - start)
+
+summary(m1_bobyqa)
+```
+
+```{r}
+all_imps <- mice::complete(imp_multi, "long") %>%
+  mutate(mean_accuracy = mean_accuracy + mean_acc) %>%
+  group_by(.imp) %>%
+  nest()
+
+all_imps[1,]$data
+```
+
+
+```{r}
+imp_models <- mice::complete(imp_multi, "long") %>%
+  mutate(mean_accuracy = mean_accuracy + mean_acc) %>%
+  group_by(.imp) %>%
+  nest() %>%
+  rowwise() %>%
+  mutate(model = list(glmer(mean_accuracy ~ . - subject - .id + (1 | subject), 
+                            data = data,
+                            family = "binomial")))
+
+imp_models
 ```
 
 
