@@ -5,9 +5,13 @@ dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
 
 source("src/load_dependencies.R")
 
-### Option: permute the matrix ownership to generate a null distribution?
+### Option: Permute the matrix ownership to generate a null distribution?
 
 PERMUTE <- TRUE
+
+### Option: Number of partitions used to calculate TDIA
+n_parts <- 30
+# Note: Takes about 5 hours and 15 minutes for n_parts = 30
 
 ### Load data
 
@@ -96,8 +100,22 @@ subsampled_tdia <- function(subject_mats, n_parts) {
   n_sub <- length(subject_mats)
   
   # Useful for later reference
-  sampled_idx <- lapply(lapply(subject_mats, length), sample.int, n_parts, TRUE)
-  # Subsampled matrices (with replacement)
+  # sampled_idx <- lapply(lapply(subject_mats, length), sample.int, n_parts, TRUE)
+  
+  # Because we want to sample entire blocks of days (currently max
+  # 30 days), we have to calculate eligible starting indices of those blocks,
+  # and then sample a single starting index per subject
+  block_length <- min(n_parts, 30)
+  lens <- sapply(subject_mats, length)
+  max_start_idx <- lens - block_length + 1
+  
+  # Sample a single starting index per subject
+  sampled_start_idx <- sapply(max_start_idx, sample.int, size = 1)
+  # Expand every start index to a block of indices
+  sampled_idx <- lapply(sampled_start_idx, 
+                        function(idx) idx:(idx+block_length-1))
+  
+  # Subsampled matrices
   sub_mats <- map2(subject_mats, sampled_idx, ~ .x[.y])
   
   # Every (unique) pair of matrices represents an edge, and for every edge 
@@ -110,12 +128,12 @@ subsampled_tdia <- function(subject_mats, n_parts) {
   coords <- 1:n_mats
   
   if (PERMUTE) {
-    # First permute within subjects, then permute the subjects themselves.
+    # Don't permute within subjects, only permute the subjects themselves.
     # Preserves within-subjects correlation.
-    permuted_idx_within <- replicate(n_sub, sample(1:n_parts), simplify = FALSE)
-    permuted_idx_between <- sample(1:n_sub)
+    # permuted_idx_within <- replicate(n_sub, sample(1:n_parts), simplify = FALSE)
+    permuted_idx_between <- sample.int(n_sub)
     
-    sub_mats <- map2(subject_mats, permuted_idx_within, ~ .x[.y])
+    # sub_mats <- map2(subject_mats, permuted_idx_within, ~ .x[.y])
     sub_mats <- sub_mats[permuted_idx_between]
   }
   
@@ -134,10 +152,10 @@ subsampled_tdia <- function(subject_mats, n_parts) {
   
   cors <- cor(mat)
   
-  # Set diagonal to 0 instead of 1, so we won't have to take into account the
+  # Set diagonal to -10 instead of 1, so we won't have to take into account the
   # correlation with the source matrix itself when assessing the highest cor-
   # relations
-  diag(cors) <- 0
+  diag(cors) <- -10
   
   tdia <- matrix(nrow = n_sub, ncol = n_parts)
   
@@ -167,14 +185,14 @@ subsampled_tdia <- function(subject_mats, n_parts) {
       
       # Do the same for the partition number. It is unlikely to matter much,
       # but perhaps it is useful for downstream analysis.
-      part_idx <- permuted_idx_within[[sub_idx]][part_idx]
+      # part_idx <- permuted_idx_within[[sub_idx]][part_idx]
     }
     
     # Subtract one from the match count to disregard the match of the source
     # matrix with itself
     # tdia[sub_idx, part_idx] <- (sum(match_idx == sub_idx) - 1) / (n_parts - 1)
     
-    # We no longer need to subtract 1 because we set diag(cors) to 0
+    # We no longer need to subtract 1 because we set diag(cors) to -10
     tdia[sub_idx, part_idx] <- sum(match_idx == sub_idx) / (n_parts - 1)
   }
   
@@ -184,9 +202,6 @@ subsampled_tdia <- function(subject_mats, n_parts) {
 ### Bootstrapping
 n_threads <- 10
 n_iter <- 10000
-
-# Number of partitions used to calculate TDIA
-n_parts <- 10
 
 cl <- makeCluster(n_threads)
 clusterSetRNGStream(cl, NULL) # Make sure every node uses a different RNG stream
@@ -208,10 +223,10 @@ print(Sys.time() - start)
 
 stopCluster(cl)
 
-out_file <- file.path(dat_dir, "tdias.rda")
+out_file <- file.path(dat_dir, str_glue("tdias_{n_parts}.rda"))
 
 if (PERMUTE) {
-  out_file <- file.path(dat_dir, "tdias_permuted_blocked2.rda")
+  out_file <- str_replace(out_file, "\\.rda", "_permuted_blocked.rda")
 }
 
 save(tdias, file = out_file)
