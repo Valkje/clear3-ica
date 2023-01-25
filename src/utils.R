@@ -53,6 +53,25 @@ calc_breaks <- function(dats_kp) {
   list(xBreaks = ls$xBreaks, yBreaks = ls$yBreaks)
 }
 
+# Get breaks of the ND histogram of all data
+calc_breaks_nd <- function(dats_kp, columns) {
+  n_sub <- length(dats_kp)
+  
+  dats_kp_alphanum <- lapply(dats_kp, function (dat_kp) {
+    filter(dat_kp, keypress_type == "alphanum", previousKeyType == "alphanum")
+  })
+  
+  cols_lists <- lapply(columns, function(c) {
+    lapply(dats_kp_alphanum, function(dat) dat[c])
+  })
+  
+  mat <- sapply(cols_lists, unlist, TRUE, FALSE)
+  
+  ls <- binNd(mat, rep(10, length(columns)))
+  
+  ls$breaks
+}
+
 # Calculate histogram matrix per day
 calc_partitions <- function(dats_kp, breaks) {
   n_sub <- length(dats_kp)
@@ -190,7 +209,12 @@ summarize_tdias <- function(file, n_parts, permuted = FALSE, julia = FALSE) {
 }
 
 # Prints and returns some plots of the summary measures of a TDIA data set
-plot_tdia_summ <- function(summ, sub = NULL, subjects = NULL) {
+plot_tdia_summ <- function(
+    summ, 
+    sub = NULL, 
+    subjects = NULL, 
+    print_plots = TRUE
+) {
   gs <- vector("list", length = 3)
   
   gs[[1]] <- ggplot(summ$iter_means, aes(iter_mean)) +
@@ -228,7 +252,9 @@ plot_tdia_summ <- function(summ, sub = NULL, subjects = NULL) {
       theme_ipsum(base_size = 15, axis_title_size = 15)
   }
   
-  lapply(gs, print)
+  if (print_plots) {
+    lapply(gs, print)
+  }
   
   gs
 }
@@ -274,6 +300,10 @@ parse_tdia_jld <- function(path) {
   tdias <- aperm(tdias, c(2, 1, 3))
   
   ds <- dim(tdias)
+  n_parts <- ds[1]
+  n_sub <- ds[2]
+  n_iter <- ds[3]
+  
   # [n_sub*n_parts] X n_iter, where the first n_parts rows are from the same
   # subject
   dim(tdias) <- c(ds[1] * ds[2], ds[3])
