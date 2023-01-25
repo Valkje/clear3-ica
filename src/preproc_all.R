@@ -1,14 +1,16 @@
+local <- TRUE
+
 wd <- ""
 
-if (.Platform$OS.type == "unix") {
+if (!local) {
   # Cluster environment
   wd <- "~/Documents/Autocorrelation"
   # Base directory for the data set we will create
   dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
 } else {
-  wd <- "M:/Documents/Autocorrelation"
+  wd <- "~/HPC/Documents/Autocorrelation"
   # Base directory for the data set we will create
-  dat_dir <- "data"
+  dat_dir <- "~/HPC_project/data"
 }
 
 # For some reason this sets the pwd only for the current scope, which means it 
@@ -24,82 +26,88 @@ dir.create(dat_dir, showWarnings = FALSE, recursive = TRUE)
 src_dir <- "../CLEAR/"
 
 ### Move all source files into a BIDS-like structure
-# src_kp_dir <- file.path(src_dir, "Clear lab participants keystroke dynamics data")
-# src_acc_dir <- file.path(src_dir, "Clear lab participants keyboard accelerometer kinematics data")
-# 
-# # Transfer files that are non-empty
-# 
-# pat <- "\\+(3[0-9]+)"
-# 
-# kp_files <- list.files(src_kp_dir, full.names = TRUE)
-# kp_files <- str_subset(kp_files, pat)
-# subjects <- str_match(kp_files, pat)[,2]
-# 
-# acc_files <- list.files(src_acc_dir, full.names = TRUE)
-# acc_files <- str_subset(acc_files, pat)
-# subjects <- base::union(subjects, str_match(acc_files, pat)[,2])
-# 
-# headers = c("distanceFromCenter", "distanceFromPrevious")
-# intendend_n_pipes <- 14
-# 
-# report_file <- file.path(dat_dir, "preproc_report.csv")
-# write_lines("subject,keystroke,accelerometer", report_file)
-# 
-# for (i in 1:length(subjects)) {
-#   sub <- subjects[i]
-#   kp_path <- kp_files[i]
-#   acc_path <- acc_files[i]
-# 
-#   sub_dir <- str_glue("sub-{sub}")
-#   raw_path <- file.path(dat_dir, sub_dir, "raw")
-# 
-#   print(str_glue("Processing source key press files for subject {sub}"))
-# 
-#   # Many key press files are missing the last two column headers,
-#   # so we will add them here if that's the case
-# 
-#   # Rather large files, so only read first two lines to check
-#   lin <- read_lines(kp_path)
-# 
-#   kp_present <- 0
-#   # If the file is empty (except for the headers), continue to the next subject
-#   if (length(lin) != 1) {
-#     kp_present <- 1
-# 
-#     actual_n_pipes <- str_count(lin[1], "\\|")
-# 
-#     sel <- (length(headers) + 1 - (intendend_n_pipes - actual_n_pipes)):length(headers)
-#     new_labels <- paste(headers[sel], collapse = "|")
-# 
-#     if (new_labels != "")
-#       lin[1] <- paste(lin[1], new_labels, sep = "|")
-# 
-#     dir.create(raw_path, showWarnings = FALSE, recursive = TRUE)
-# 
-#     sub_kp_file <- file.path(raw_path, str_glue("sub-{sub}_keystrokes.psv"))
-#     write_lines(lin, sub_kp_file)
-#   }
-# 
-#   print(str_glue("Processing source accelerometer files for subject {sub}"))
-# 
-#   # Rather large files, so only read first two lines to check
-#   lin <- read_lines(acc_path, n_max = 2)
-# 
-#   acc_present <- 0
-#   if (length(lin) != 1) {
-#     acc_present <- 1
-# 
-#     dir.create(raw_path, showWarnings = FALSE, recursive = TRUE)
-# 
-#     sub_acc_file <- file.path(raw_path, str_glue("sub-{sub}_accelerometer.psv"))
-#     file.copy(acc_path, sub_acc_file, overwrite = TRUE)
-#   }
-# 
-#   # So we know what data are present
-#   write_lines(paste(sub, kp_present, acc_present, sep = ","),
-#               report_file,
-#               append = TRUE)
-# }
+src_kp_dir <- file.path(src_dir, "Clear lab participants keystroke dynamics data")
+src_acc_dir <- file.path(src_dir, "Clear lab participants keyboard accelerometer kinematics data")
+
+# Transfer files that are non-empty
+
+pat <- "\\+(3[0-9]+)"
+
+kp_files <- list.files(src_kp_dir, full.names = TRUE)
+kp_files <- str_subset(kp_files, pat)
+subjects <- str_match(kp_files, pat)[,2]
+
+acc_files <- list.files(src_acc_dir, full.names = TRUE)
+acc_files <- str_subset(acc_files, pat)
+subjects_acc <- str_match(acc_files, pat)[,2]
+
+if (any(subjects != subjects_acc)) {
+  stop("Key press files do not match up with accelerometer files")
+}
+
+# The first line of the PSV key stroke files contains the column headers, but 
+# while there are 15 columns, quite often there are only 13 headers, for reasons 
+# unknown to me. Some of the code below tries to fix that.
+headers = c("distanceFromCenter", "distanceFromPrevious")
+intendend_n_pipes <- 14
+
+report_file <- file.path(dat_dir, "preproc_report.csv")
+write_lines("subject,keystroke,accelerometer", report_file)
+
+for (i in 1:length(subjects)) {
+  sub <- subjects[i]
+  kp_path <- kp_files[i]
+  acc_path <- acc_files[i]
+
+  sub_dir <- str_glue("sub-{sub}")
+  raw_path <- file.path(dat_dir, sub_dir, "raw")
+
+  print(str_glue("Processing source key press files for subject {sub}"))
+
+  # Many key press files are missing the last two column headers,
+  # so we will add them here if that's the case
+
+  lin <- read_lines(kp_path)
+
+  kp_present <- 0
+  # If the file is empty (except for the headers), skip this step
+  if (length(lin) != 1) {
+    kp_present <- 1
+
+    actual_n_pipes <- str_count(lin[1], "\\|")
+
+    sel <- (length(headers) + 1 - (intendend_n_pipes - actual_n_pipes)):length(headers)
+    new_labels <- paste(headers[sel], collapse = "|")
+
+    if (new_labels != "")
+      lin[1] <- paste(lin[1], new_labels, sep = "|")
+
+    dir.create(raw_path, showWarnings = FALSE, recursive = TRUE)
+
+    sub_kp_file <- file.path(raw_path, str_glue("sub-{sub}_keystrokes.psv"))
+    write_lines(lin, sub_kp_file)
+  }
+
+  print(str_glue("Processing source accelerometer files for subject {sub}"))
+
+  # Rather large files, so only read first two lines to check
+  lin <- read_lines(acc_path, n_max = 2)
+
+  acc_present <- 0
+  if (length(lin) != 1) {
+    acc_present <- 1
+
+    dir.create(raw_path, showWarnings = FALSE, recursive = TRUE)
+
+    sub_acc_file <- file.path(raw_path, str_glue("sub-{sub}_accelerometer.psv"))
+    file.copy(acc_path, sub_acc_file, overwrite = TRUE)
+  }
+
+  # So we know what data are present
+  write_lines(paste(sub, kp_present, acc_present, sep = ","),
+              report_file,
+              append = TRUE)
+}
 
 ### Listing available raw data files
 dirs <- list.dirs(dat_dir)

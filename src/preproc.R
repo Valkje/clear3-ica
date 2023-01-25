@@ -6,34 +6,41 @@ library(lubridate)
 
 # Preprocess the accelerometer data
 preproc_acc <- function(raw_acc, verbose = FALSE) {
-  if (verbose) print("Converting dates and times to objects...")
+  # Small wrapper around boolean test and print
+  vprint <- function(text) if (verbose) print(text)
+  
+  vprint("Converting dates and times to objects...")
   
   dat_acc <- raw_acc %>%
     mutate(
+      # Timezone is coded as number of hours deviating from UCT times 100
+      # (e.g. -600), so multiply by 36 to get offset in seconds.
       sessionTimestampLocal = as_datetime(sessionTimestamp + createdOnTimeZone * 36),
       sessionNumber = cumsum(sampleNumber == 1)
     ) %>%
     rename(x = xCoord, y = yCoord, z = zCoord) %>%
     select(!c(sessionTimestamp, sessionTimeZone, sampleNumber))
   
-  if (verbose) print("Filtering...")
+  vprint("Filtering...")
   
-  # Discrete Butterworth filter
+  # Discrete Butterworth filter to get rid of noise
   but <- butter(2, w = 0.8, plane = "z", type = "low", output = "Sos")
   
   dat_acc <- dat_acc %>%
     group_by(sessionNumber) %>%
     mutate(
+      # Filter forwards and backwards
       xFiltered = filtfilt(but, x),
       yFiltered = filtfilt(but, y),
       zFiltered = filtfilt(but, z)
     )
   
-  if (verbose) print("Marking as active/upright...")
+  vprint("Marking as active/upright...")
   
   dat_acc <- dat_acc %>%
     mutate(
       magnitude = sqrt(xFiltered^2 + yFiltered^2 + zFiltered ^2),
+      # If magnitude ~ 1, then phone was stationary, i.e. inactive
       activeSample = magnitude < 0.95 | magnitude > 1.05
     ) %>%
     group_by(sessionNumber) %>%
@@ -45,7 +52,7 @@ preproc_acc <- function(raw_acc, verbose = FALSE) {
       bed = !(activeSes | upright)
     )
   
-  if (verbose) print("Done with accelerometer data!")
+  vprint("Done with accelerometer data!")
   
   return(dat_acc)
 }
@@ -73,6 +80,7 @@ preproc_kp <- function(raw_kp, dat_acc, verbose = FALSE) {
       sessionNumber = cumsum(sampleNumber == 1),
       sessionTimestampLocal = as_datetime(sessionTimestamp + createdOnTimeZone * 36),
       keypressTimestampLocal = as_datetime(timestamp + createdOnTimeZone * 36),
+      # Reformat iPhone type for easier look-up in screen point size table
       phoneType = paste(
         "iPhone",
         str_replace(
@@ -91,6 +99,7 @@ preproc_kp <- function(raw_kp, dat_acc, verbose = FALSE) {
   
   vprint("Converting screen point distance to centimeters...")
   
+  # This file contains a table with iPhone screen point size info
   screen_specs <- read.delim("data/iPhone_screen_specs.tsv", strip.white = TRUE)
   # This assumes that the subject has only used one phone during the study.
   # Having to check the phone type for every row slows down the code considerably.
