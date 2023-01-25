@@ -942,3 +942,16 @@ tdias_julia_30_blocked_summ <- summarize_tdias(file.path(
 ```{r fig.height=8}
 gs <- plot_tdia_summ(tdias_julia_30_blocked_summ, 3100, subjects)
 ```
+
+## Julia - 30 partitions - Blocked - Bound histograms
+
+```{r}
+tdias_jl_30_blck_bnd_summ <- summarize_tdias(file.path(dat_dir, 
+                                                       "tdias_bound_hists.jld"),
+                                             n_parts = 30, julia = TRUE)
+```
+
+```{r fig.height=8}
+gs <- plot_tdia_summ(tdias_jl_30_blck_bnd_summ, 3100, subjects)
+```
+
