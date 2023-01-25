@@ -551,6 +551,99 @@ ggplot(melt(cors), aes(X1, X2)) +
 ggsave("images/autocorrelation/correlations/sub-3083_cor_mat.png")
 ```
 
+# `active` and `totalKeyPresses` histograms
+
+```{r}
+active <- lapply(dats_ses, function(df) df$active)
+totalKeyPresses <- lapply(dats_ses, function(df) df$totalKeyPresses)
+
+ls <- bin2d(unlist(active), unlist(totalKeyPresses), xBins = 2, yBins = 100)
+```
+
+```{r}
+ses_hists <- lapply(dats_ses, function(df) {
+  df <- df %>%
+    group_by(date) %>%
+    nest() %>%
+    mutate(
+      hist = map(data, function(df) {
+        binCounts(df$active, 
+                  df$totalKeyPresses, 
+                  ls$xBreaks, 
+                  ls$yBreaks)
+      })
+    )
+  
+  df$hist
+})
+```
+
+```{r}
+counts <- ls$counts %>%
+  rownames_to_column("X1") %>%
+  melt(id.vars = "X1", variable_name = c("X2")) %>%
+  mutate(
+    # X1 = case_when(
+    #   X1 == "0.245" ~ 0,
+    #   TRUE ~ 1
+    # ),
+    X1 = as.double(X1),
+    X2 = as.double(as.character(X2))
+  )
+  
+ggplot(counts, aes(X2, X1)) +
+  geom_raster(aes(fill = log(value)))
+```
+
+```{r}
+df <- dats_ses[[1]] %>%
+  group_by(date) %>%
+  nest() %>%
+  mutate(
+    numberOfSessions = nrow(data[[1]]),
+    hist = map(data, function(df) {
+      binCounts(df$active, 
+                df$totalKeyPresses, 
+                ls$xBreaks, 
+                ls$yBreaks)
+    })
+  )
+
+df
+```
+
+```{r}
+df[2,2][[1]]
+```
+
+```{r}
+ses_hists[[1]][[2]]
+```
+
+
+```{r}
+lapply(ses_hists[[1]], function(h) {
+  ggplot(melt(h), aes(X2, X1)) +
+    geom_raster(aes(fill = value))
+})
+```
+
+## Bind to 'standard' subject histograms
+
+```{r}
+bound_mats <- map2(subject_mats, ses_hists, map2, rbind)
+```
+
+```{r}
+ggplot(melt(bound_mats[[1]][[1]]), aes(X2, X1)) +
+  geom_raster(aes(fill = value))
+```
+
+```{r}
+save(bound_mats, file = file.path(dat_dir, "bound_mats.rda"))
+```
+
+
 # Confusion matrix of TDIA calculation
 
 ```{r}
@@ -573,4 +666,55 @@ ggplot(melt(conf_mat), aes(X2, X1)) +
 b <- barplot(colSums(conf_mat))
 axis(1, b, labels = 1:ncol(conf_mat))
 ```
+
+## Find out what sets apart the attractors
+
+I.e. subjects 5, 23, 38, 39, and 47. First plot data quantity over subjects:
+
+```{r}
+dats_kp_alphanum_lens <- lapply(dats_kp, function (dat_kp) {
+    nrow(filter(dat_kp, 
+                keypress_type == "alphanum", previousKeyType == "alphanum"))
+  })
+dats_kp_alphanum_lens <- unlist(dats_kp_alphanum_lens)
+```
+
+```{r}
+tdias_julia_30_blocked_summ <- summarize_tdias(file.path(
+                                                 dat_dir, 
+                                                 "tdias_flattened.jld"
+                                               ), 
+                                               n_parts = 30, julia = TRUE)
+
+g_tdia_sub <- plot_tdia_summ(tdias_julia_30_blocked_summ, print_plots = FALSE)[[2]]
+```
+
+```{r}
+g_tdia_sub
+```
+
+
+```{r fig.height=8}
+# par(mfrow = c(2, 1))
+# 
+# b <- barplot(colSums(conf_mat))
+# axis(1, b, labels = 1:ncol(conf_mat))
+# 
+# b <- barplot(dats_kp_alphanum_lens)
+# axis(1, b, labels = 1:length(dats_kp_alphanum_lens))
+
+df_conf <- data.frame(subject = 1:ncol(conf_mat), column_count = colSums(conf_mat))
+g1 <- ggplot(df_conf, aes(subject, column_count)) +
+  geom_col() +
+  theme(text = element_text(size=14))
+
+df_kp <- data.frame(subject = 1:ncol(conf_mat), keystroke_count = dats_kp_alphanum_lens)
+g2 <- ggplot(df_kp, aes(subject, keystroke_count)) +
+  geom_col() +
+  theme(text = element_text(size=14))
+
+ggarrange(g1, g2, g_tdia_sub, nrow = 3)
+```
+
+
 
