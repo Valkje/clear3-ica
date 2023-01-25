@@ -69,9 +69,10 @@ function subsampled_tdia(subject_mats, n_parts, permute::Bool)
         sub_mats = sub_mats[permuted_idx_between]
     end
 
-    # Squash vector of vector of matrices to a [10000]X[n_sub*n_parts] matrix.
+    # Squash vector of vector of matrices to a [n_entries]X[n_sub*n_parts] matrix.
     # Faster and less memory-intensive than calling mapreduce twice.
-    mat = Matrix{Int32}(undef, 10000, n_sub * n_parts)
+    n_entries = length(subject_mats[1][1])
+    mat = Matrix{Int32}(undef, n_entries, n_sub * n_parts)
     for i = 1:n_sub, j = 1:n_parts
         mat[:, (i - 1) * n_parts + j] = vec(sub_mats[i][j])
     end
@@ -190,13 +191,13 @@ function flat(sampled_idx::Matrix{Vector{Int32}}, n_sub, n_iter, n_parts)
     flattened
 end
 
-objs = load(joinpath(dat_dir, "subject_mats.rda"))
-subject_mats = objs["subject_mats"];
+objs = load(joinpath(dat_dir, "bound_mats.rda"))
+subject_mats = objs["bound_mats"];
 
 tdias, sampled_idx, conf_mat = mainp(subject_mats, permute, n_parts, n_iter)
 
 if !locally
-    save(joinpath(dat_dir, "tdias_flattened_p.jld"), 
+    save(joinpath(dat_dir, "tdias_bound_hists.jld"), 
         "tdias", tdias, 
         "sampled_idx", sampled_idx,
         "conf_mat", conf_mat,
