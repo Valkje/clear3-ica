@@ -101,8 +101,10 @@ IntegerVector binCountsNd(
   // Size of every dimension of the ND histogram
   IntegerVector histDims(breaks.size());
   
-  // Check that all vectors have the same length
+  // Get the dimensions the histogram is supposed to have
   for (uint_fast32_t i = 0; i < breaks.size(); i++)
+    // The breaks indicate the borders of the bins/cells. If there are n breaks,
+    // there are n-1 cells.
     histDims[i] = breaks[i].length() - 1;
   
   // Initialize Nd count vector
@@ -110,8 +112,6 @@ IntegerVector binCountsNd(
   for (uint_fast32_t i = 0; i < counts.length(); i++)
     counts[i] = 0;
   
-  // Get bin for every vector
-  // Add 1 to appropriate cell in count vector
   bool isNa;
   std::vector<uint64_t> bins(vecMat.ncol());
   uint64_t idx;
@@ -132,11 +132,13 @@ IntegerVector binCountsNd(
     if (isNa)
       continue;
     
-    // For every vector+break pair j...
+    // Get bin for every vector j
     for (uint_fast32_t j = 0; j < vecMat.ncol(); j++) {
       bins[j] = getBin(vecMat(i, j), breaks[j]);
     }
     
+    // Add 1 to appropriate cell in count vector. First convert collection of
+    // Nd indices to a single index into the flattened vector.
     idx = getLinearIndex(bins, histDims);
     counts[idx] += 1;
   }
@@ -204,6 +206,7 @@ NumericVector calcBreaks(const NumericVector& dat, const uint_fast32_t& nBins) {
 NumericVector calcCenters(const NumericVector& breaks) {
   NumericVector centers(breaks.length() - 1);
   for (uint_fast32_t i = 0; i < breaks.length() - 1; i++) {
+    // Simply take the middle between two break points
     centers[i] = (breaks[i] + breaks[i+1]) / 2;
   }
   
@@ -261,7 +264,8 @@ List binNd(NumericMatrix vectorMat, IntegerVector nBins) {
 // run after the compilation.
 //
 
-/*** R 
+// Note: To enable, change first line to "/*** R", i.e. add an asterisk
+/** R 
 library(reshape)
 library(tidyverse)
 
