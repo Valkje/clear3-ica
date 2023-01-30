@@ -23,8 +23,10 @@ permute = false
 
 ### Option: Number of partitions used to calculate TDIA
 # Takes about 1:30 hours with 5 cores using BLAS
-# Takes bout 50 minutes with 10 cores using parallelisation
-n_parts = 30 
+# Takes about 50 minutes with 10 cores using parallelisation
+# n_parts = 30 
+
+n_parts = 6 # minimum number of weeks available
 
 ### Option: How many iterations should be executed (in total)
 if locally
@@ -191,13 +193,15 @@ function flat(sampled_idx::Matrix{Vector{Int32}}, n_sub, n_iter, n_parts)
     flattened
 end
 
-objs = load(joinpath(dat_dir, "bound_mats.rda"))
-subject_mats = objs["bound_mats"];
+# objs = load(joinpath(dat_dir, "weekly_subject_mats.rda"))
+# subject_mats = objs["subject_mats"];
+
+subject_mats = load(joinpath(dat_dir, "weekly_subject_mats.rds"))
 
 tdias, sampled_idx, conf_mat = mainp(subject_mats, permute, n_parts, n_iter)
 
 if !locally
-    save(joinpath(dat_dir, "tdias_bound_hists.jld"), 
+    save(joinpath(dat_dir, "tdias_weekly_mats.jld"), 
         "tdias", tdias, 
         "sampled_idx", sampled_idx,
         "conf_mat", conf_mat,
