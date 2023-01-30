@@ -27,6 +27,10 @@ setwd(wd)
 source("src/load_dependencies.R")
 ```
 
+# Calculate partitions
+
+## Per day
+
 ```{r}
 ls <- get_partitions(dat_dir)
 
@@ -43,6 +47,28 @@ In case I don't want to load the key press data itself (can take quite long over
 ```{r}
 ls <- load_subject_key_data(dat_dir, load_kp = FALSE)
 subjects <- ls$subjects
+```
+
+```{r}
+subject_mats <- calc_partitions(dats_kp, 
+                                list(xBreaks = xBreaks, yBreaks = yBreaks), 
+                                date)
+```
+
+## Per week
+
+```{r}
+ls <- get_partitions(dat_dir, week)
+subjects <- ls$dat$subjects
+dats_kp <- ls$dat$dats_kp
+dats_ses <- ls$dat$dats_ses
+xBreaks <- ls$breaks$xBreaks
+yBreaks <- ls$breaks$yBreaks
+subject_mats <- ls$subject_mats
+```
+
+```{r}
+saveRDS(subject_mats, file.path(dat_dir, "weekly_subject_mats.rds"))
 ```
 
 
@@ -940,7 +966,10 @@ tdias_julia_30_blocked_summ <- summarize_tdias(file.path(
 ```
 
 ```{r fig.height=8}
-gs <- plot_tdia_summ(tdias_julia_30_blocked_summ, 3100, subjects)
+sub <- 3100
+gs <- plot_tdia_summ(tdias_julia_30_blocked_summ, sub, subjects)
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_julia_30_blocked_over_partition_sub_{sub}.png"),
+       gs[[3]], dpi = 150, height = 750, width = 1750, units = "px")
 ```
 
 ## Julia - 30 partitions - Blocked - Bound histograms
@@ -952,6 +981,49 @@ tdias_jl_30_blck_bnd_summ <- summarize_tdias(file.path(dat_dir,
 ```
 
 ```{r fig.height=8}
-gs <- plot_tdia_summ(tdias_jl_30_blck_bnd_summ, 3100, subjects)
+sub <- 3100
+gs <- plot_tdia_summ(tdias_jl_30_blck_bnd_summ, sub, subjects)
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_jl_30_blck_bnd_over_partition_sub_{sub}.png"),
+       gs[[3]], dpi = 150, height = 750, width = 1750, units = "px")
+```
+
+```{r}
+extended <- rep(c(FALSE, TRUE), each = nrow(tdias_julia_30_blocked_summ$iter_means))
+g <- plot_tdia_comp(tdias_julia_30_blocked_summ, tdias_jl_30_blck_bnd_summ, extended, "Extended")
+
+ggsave("images/test_tdia/extended_2dhist_histograms.png")
+```
+
+## Julia - 6 partitions - Blocked - Weekly histograms
+
+```{r}
+tdias_jl_6_blck_wkl_summ <- summarize_tdias(file.path(
+                                              dat_dir, 
+                                              "tdias_weekly_mats.jld"
+                                            ), 
+                                            n_parts = 6, julia = TRUE)
+```
+
+```{r fig.height=8}
+sub <- 3100
+gs <- plot_tdia_summ(tdias_jl_6_blck_wkl_summ, sub, subjects)
+```
+
+```{r fig.height=8}
+weekly <- rep(c(FALSE, TRUE), each = nrow(tdias_julia_30_blocked_summ$iter_means))
+g <- plot_tdia_comp(tdias_julia_30_blocked_summ, tdias_jl_6_blck_wkl_summ, weekly, "Weekly")
+```
+
+```{r fig.height=8}
+g1 <- plot_tdia_summ(tdias_julia_30_blocked_summ, sub, subjects, print_plots = FALSE)[[2]]
+g2 <- plot_tdia_summ(tdias_jl_6_blck_wkl_summ, sub, subjects, print_plots = FALSE)[[2]]
+
+ggarrange(g1, g2, nrow = 2)
+```
+
+Chance accuracy:
+
+```{r}
+(6 - 1) / (51 * (6 - 1))
 ```
 
