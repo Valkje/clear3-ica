@@ -23,4 +23,5 @@ filter <- dplyr::filter
 
 source("src/preproc.R")
 source("src/utils.R")
+source("src/calc_fingerprints.R")
 sourceCpp("src/bin2d.cpp")
