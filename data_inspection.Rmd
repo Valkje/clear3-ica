@@ -84,6 +84,46 @@ dat %>%
 dat
 ```
 
+# BiAffect data
+
+```{r}
+dats_ses[[1]]
+```
+
+```{r}
+dats_kp[[1]]
+```
+
+
+```{r}
+names(dats_ses) <- subjects
+biaffect_cors <- bind_rows(dats_ses, .id = "subject") %>%
+  mutate(week = week(date)) %>%
+  group_by(subject, week) %>%
+  select(medianIKD:backspaceRate, totalKeyPresses:bed) %>%
+  nest() %>%
+  mutate(
+    cor_mat = list(cor(data[[1]]))
+  )
+
+biaffect_cors
+```
+
+```{r}
+melt(biaffect_cors$cor_mat[[1]])
+```
+
+
+```{r}
+ggplot(melt(biaffect_cors$cor_mat[[102]]), aes(X2, X1)) +
+  geom_raster(aes(fill = value)) +
+  scale_y_discrete(limits = rev) +
+  scale_fill_gradient2(low = muted("blue"), high = muted("red"), mid = "white", 
+                       limits = c(-1, 1)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+
 # Perimenstrual suicidality data
 
 ```{r}
@@ -579,6 +619,11 @@ ses_hists <- lapply(dats_ses, function(df) {
 ```
 
 ```{r}
+ls$counts
+```
+
+
+```{r}
 counts <- ls$counts %>%
   rownames_to_column("X1") %>%
   melt(id.vars = "X1", variable_name = c("X2")) %>%
@@ -591,8 +636,11 @@ counts <- ls$counts %>%
     X2 = as.double(as.character(X2))
   )
   
-ggplot(counts, aes(X2, X1)) +
-  geom_raster(aes(fill = log(value)))
+ggplot(counts, aes(X1, X2)) +
+  geom_raster(aes(fill = log(value))) +
+  scale_x_continuous(breaks = c(0.25, 0.75), labels = c("FALSE", "TRUE")) +
+  ylab("totalKeyPresses") +
+  xlab("active")
 ```
 
 ```{r}
@@ -635,8 +683,8 @@ bound_mats <- map2(subject_mats, ses_hists, map2, rbind)
 ```
 
 ```{r}
-ggplot(melt(bound_mats[[1]][[1]]), aes(X2, X1)) +
-  geom_raster(aes(fill = value))
+ggplot(melt(bound_mats[[1]][[1]]), aes(X1, X2)) +
+  geom_raster(aes(fill = log(value)))
 ```
 
 ```{r}
@@ -647,7 +695,7 @@ save(bound_mats, file = file.path(dat_dir, "bound_mats.rda"))
 # Confusion matrix of TDIA calculation
 
 ```{r}
-ls <- parse_tdia_jld(file.path(dat_dir, "tdias_flattened_p.jld"))
+ls <- parse_tdia_jld(file.path(dat_dir, "tdias_weekly_mats.jld"))
 conf_mat <- ls$conf_mat
 ```
 
@@ -655,7 +703,13 @@ conf_mat <- ls$conf_mat
 # Something to be aware of: X2 indicates the column number, not the row number
 ggplot(melt(conf_mat), aes(X2, X1)) +
   geom_raster(aes(fill = value)) + 
-  scale_y_reverse()
+  scale_y_reverse() +
+  scale_fill_viridis_c() +
+  xlab("Predicted subject") +
+  ylab("Actual subject") +
+  labs(fill = "Count")
+
+# ggsave("images/test_tdia/confusion_matrix.png")
 
 ggplot(melt(conf_mat), aes(X2, X1)) +
   geom_raster(aes(fill = log(value))) + 
@@ -686,7 +740,8 @@ tdias_julia_30_blocked_summ <- summarize_tdias(file.path(
                                                ), 
                                                n_parts = 30, julia = TRUE)
 
-g_tdia_sub <- plot_tdia_summ(tdias_julia_30_blocked_summ, print_plots = FALSE)[[2]]
+g_tdia_sub <- plot_tdia_summ(tdias_julia_30_blocked_summ, print_plots = FALSE)[[2]] +
+  theme(text = element_text(size = 14))
 ```
 
 ```{r}
@@ -713,7 +768,9 @@ g2 <- ggplot(df_kp, aes(subject, keystroke_count)) +
   geom_col() +
   theme(text = element_text(size=14))
 
-ggarrange(g1, g2, g_tdia_sub, nrow = 3)
+ggarrange(g1, g2, g_tdia_sub, nrow = 3, align = "hv")
+
+ggsave("images/test_tdia/confusion_matrix_comparison.png")
 ```
 
 
