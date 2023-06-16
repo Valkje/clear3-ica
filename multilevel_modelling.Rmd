@@ -1,0 +1,1265 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+local <- TRUE
+
+wd <- ""
+
+if (!local) {
+  # Cluster environment
+  wd <- "~/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
+} else {
+  wd <- "/Volumes/home/preclineu/lorkno/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "~/HPC_project/data"
+}
+
+model_dir <- file.path(dat_dir, "complete_data_models")
+
+# For some reason this sets the pwd only for the current scope, which means it 
+# does not affect anything outside an if block if you set it there.
+# So that's why it's here instead of above.
+setwd(wd) 
+
+source("src/load_dependencies.R")
+
+# Because it's required by the Lancet
+options(OutDec = "·")
+```
+
+```{r}
+# Semi-contiguous data
+dat_reg_contig <- readRDS(file.path(dat_dir, "dat_reg_semi_contiguous.rds"))
+dat_reg_contig
+```
+
+```{r}
+dat_bi <- dat_reg_contig %>%
+  filter(modality == "biaffect") %>%
+  select(!c(study_start_date, treatment_start_date, modality)) %>%
+  pivot_wider(names_from = variable, values_from = value) %>%
+  select(!partition_idx)
+
+dat_bi
+```
+
+```{r}
+dat_sr <- dat_reg_contig %>%
+  filter(modality == "self_report") %>%
+  select(!c(study_start_date, treatment_start_date, modality)) %>%
+  pivot_wider(names_from = variable, values_from = value)
+
+dat_sr
+```
+
+
+# Combine with ICs
+
+```{r}
+load(file.path(dat_dir, "dat_reg_contig_icas.rda"))
+ns_comp <- as.integer(names(icas))
+```
+
+```{r}
+data.frame(icas[[1]]$S) %>%
+  add_column(date = dates, subject = subs)
+```
+
+```{r}
+dats <- lapply(icas, function(ica) {
+  data.frame(ica$S) %>%
+    add_column(subject = subs, date = dates) %>%
+    inner_join(dat_bi, by = c("subject", "date")) %>%
+    mutate(
+      week = week(date),
+      sub_week = paste(subject, week, sep = " - ") # For convenience
+    ) %>%
+    relocate(subject, date, week, sub_week, .before = X1)
+})
+
+names(dats) <- ns_comp
+
+dats[[1]]
+```
+
+# Trash weeks within subjects with only one observation
+
+```{r}
+print(str_glue("Entries in data: {nrow(dats[[1]])}"))
+print(str_glue("\tNumber of subjects: {n_distinct(dats[[1]]$subject)}"))
+
+dats_f <- lapply(dats, function(dat) {
+  dat %>%
+    group_by(sub_week) %>%
+    filter(n() > 1) %>%
+    ungroup()
+})
+
+print(str_glue("Entries in data after filtering out weeks with one observation: {nrow(dats_f[[1]])}"))
+print(str_glue("\tNumber of subjects: {n_distinct(dats_f[[1]]$subject)}"))
+```
+
+```{r}
+subs <- dats_f[[1]]$subject
+print(table(subs))
+n_distinct(subs)
+```
+
+
+# Set apart a portion of the data as validation set
+
+```{r}
+set.seed(42)
+
+# Minimal threshold for proportion of the data that goes towards validation
+val_prop_thr <- 0.1
+
+# All data sets have the same number of entries, so we'll just select the first
+# one to determine our split
+dat <- dats_f[[1]]
+
+# Keep selecting subjects until val_prop is satisfied
+subs <- unique(dat$subject)
+subs_perm <- sample(subs)
+
+val_prop <- 0
+
+for (i in 1:length(subs_perm)) {
+  sub <- subs_perm[i]
+  
+  val_prop <- val_prop + length(dat$subject[dat$subject == sub]) / nrow(dat)
+  
+  if (val_prop >= val_prop_thr) {
+    val_subs <- subs_perm[1:i]
+    break
+  }
+}
+
+print(val_prop)
+print(val_subs)
+```
+
+```{r}
+# # Validation data
+# dats_v <- lapply(dats_f, function(dat) {
+#   dat %>%
+#     filter(subject %in% val_subs)
+# })
+# 
+# # Training data
+# dats_t <- lapply(dats_f, function(dat) {
+#   dat %>%
+#     filter(!(subject %in% val_subs))
+# })
+
+# For now, we use everything as training data
+dats_t <- dats_f
+```
+
+# Examine IC behavior per grouping factor
+
+Different people might experience a week differently. A good week for me could be a bad week for you, so it seems warranted to model a random effect of week within subject. We thought about including month as well, but that might be highly collinear with week. Perhaps we could include a random effect of menstrual cycle as well, but that might saturate the model - we'll check later whether this is possible. All in all, we hypothesise the following random effects:
+
+* Subject.
+* Week (within subject).
+
+The first thing we have to do is check whether this grouping structure is justified. We start by plotting the data.
+
+Before we proceed, we should scale the BiAffect data. In addition, totalKeyPresses should be log-transformed:
+
+```{r}
+dats_c <- lapply(dats_t, function(dat) {
+  dat %>%
+    mutate(
+      totalKeyPresses = log(totalKeyPresses),
+      across(medianIKD:mean_accuracy, scale)
+    )
+})
+
+dats_c[[1]]
+```
+
+Intermezzo: How correlated are active, upright, and bed?
+
+```{r}
+ggplot(dats_c[[1]]) +
+  geom_point(aes(active, bed), color = "steelblue") +
+  geom_point(aes(active, upright), color = "darkred")
+
+cor(dats_c[[1]] %>% select(active, bed, upright))
+```
+
+Let's throw out bed, as it's very correlated with upright and active.
+
+## 5 components
+
+```{r}
+dat_c1 <- dats_c[[1]]
+```
+
+Let's check if a random effect of subject is necessary:
+
+```{r fig.height=10}
+for (ic in str_subset(colnames(dat_c1), "^X\\d+$")) {
+  g <- ggplot(dat_c1, aes(.data[[ic]], subject)) +
+    geom_point() +
+    labs(title = ic)
+  
+  print(g)
+}
+```
+
+There is considerable between-subject variability. Do we see the same if we condition on a fixed effect?
+
+```{r fig.height=10}
+for (ic in str_subset(colnames(dat_c1), "^X\\d+$")) {
+  g <- ggplot(dat_c1, aes(medianIKD, .data[[ic]])) +
+    geom_point() +
+    facet_wrap(~ subject, scales = "free_x") +
+    labs(title = ic)
+  
+  print(g)
+}
+```
+
+We do. Technically, we would need to check all fixed effects, but that would be a bit too much. I think we can be fairly certain random subject effects are necessary. If not, we can always go back.
+
+Let's check for week nested within subject:
+
+```{r fig.height=10}
+ggplot(dat_c1 %>%
+        mutate(sub_week = paste(subject, week(date), sep = " - ")), 
+       aes(X1, sub_week)) +
+geom_point() +
+labs(title = sub)
+
+for (sub in unique(dat_c1$subject)) {
+  g <- ggplot(dat_c1 %>%
+                filter(subject == sub) %>%
+                mutate(sub_week = paste(subject, week(date), sep = " - ")), 
+              aes(X1, sub_week)) +
+    geom_point() +
+    labs(title = sub)
+  
+  print(g)
+}
+```
+
+It's a bit hard to see, but we do see different effects of week within subject (compare e.g. subject 3029, week 36, to subject 3024, week 36).
+
+Now we will double check the necessity for the hypothesised random effects with `lmList`.
+
+```{r}
+m5.sub_list <- lme4::lmList(X1 ~ medianIKD +
+                             percent95IKD +
+                             madIKD +
+                             autocorrectRate +
+                             backspaceRate +
+                             totalKeyPresses +
+                             active +
+                             upright | 
+                              subject,
+                            data = dat_c1)
+
+m5.sub_list
+```
+
+```{r fig.height=10}
+plot(confint(m5.sub_list))
+```
+
+We cannot make interval plots for `subject/week`, as we always have more predictors than observations (a maximum of 7 per week). We therefore do it for `week` instead.
+
+```{r}
+m5.week_list <- lme4::lmList(X1 ~ mean_accuracy + 
+                               medianIKD +
+                               percent95IKD +
+                               madIKD +
+                               autocorrectRate +
+                               backspaceRate +
+                               totalKeyPresses +
+                               active +
+                               upright | 
+                                week,
+                              data = dat_c1)
+
+m5.week_list
+```
+
+```{r fig.height=10}
+plot(confint(m5.week_list))
+```
+
+## 10 components
+
+```{r}
+dat_c2 <- dats_c[[2]]
+```
+
+Let's check if a random effect of subject is necessary:
+
+```{r fig.height=10}
+for (ic in str_subset(colnames(dat_c2), "^X\\d+$")) {
+  g <- ggplot(dat_c2, aes(.data[[ic]], subject)) +
+    geom_point() +
+    labs(title = ic)
+  
+  print(g)
+}
+```
+
+It is.
+
+# Mixed-effects models 
+
+## 5 components
+
+```{r}
+dat_c1 <- dats_c[[1]]
+```
+
+```{r}
+m5.X1 <- lmer(X1 ~ medianIKD +
+               percent95IKD +
+               madIKD +
+               autocorrectRate +
+               backspaceRate +
+               totalKeyPresses +
+               active +
+               upright +
+               (1 | subject / week),
+             data = dat_c1)
+
+m5.X1
+```
+
+```{r}
+summary(m5.X1)
+```
+
+### Evaluate residuals
+
+```{r}
+qqnorm(resid(m5.X1))
+qqline(resid(m5.X1))
+```
+
+```{r fig.height=10}
+df <- data.frame(
+  subject = dat_c1$subject, 
+  week = dat_c1$week, 
+  residuals = resid(m5.X1)
+)
+
+ggplot(df, aes(residuals, subject)) +
+  geom_point()
+```
+
+There are a couple of subjects with rather large (negative) residuals. Otherwise, they are distributed quite normally.
+
+```{r}
+plot(m5.X1)
+```
+
+No heteroskedasticity.
+
+```{r}
+plot(m5.X1, subject ~ resid(.))
+```
+
+Residuals are roughly centered at 0 for all subjects, but their variance differs per subject. Might be because some subjects have relatively few observations.
+
+```{r fig.height=10}
+plot(m5.X1, subject ~ resid(.) | week, abline = 0)
+```
+
+Not all week-specific estimates are centered around 0. Perhaps we need to allow different variances per subject or week within subject.
+
+```{r eval=FALSE}
+m5.X1.var <- lme(X1 ~ medianIKD +
+                   percent95IKD +
+                   madIKD +
+                   autocorrectRate +
+                   backspaceRate +
+                   totalKeyPresses +
+                   active +
+                   upright,
+                 random = ~ 1 | subject / week,
+                 data = dat_c1,
+                 weights = varIdent(form = ~ 1 | subject * week),
+                 control = lmeControl(msMaxEval = 500))
+
+m5.X1.var
+```
+
+Sadly, the model above does not converge. Not too unexpected, as it as asks for lots of different variance parameters.
+
+### Evaluate random effects
+
+```{r}
+re_sub <- ranef(m5.X1)$subject$`(Intercept)`
+re_week <- ranef(m5.X1)$`week:subject`$`(Intercept)`
+
+qqnorm(re_sub)
+qqline(re_sub)
+```
+
+Hm, the tails of the random subject effects distribution are quite small.
+
+```{r}
+qqnorm(re_week)
+qqline(re_week)
+```
+
+The distribution of the week within subject random effects is a bit skewed, but otherwise looks quite good.
+
+### Miscellaneous evaluation
+
+```{r fig.height=10}
+plot(m5.X1, X1 ~ fitted(.) | subject, abline = c(0, 1))
+```
+
+Is week within subject a good addition to the model?
+
+```{r}
+m5.X1.1 <- lmer(X1 ~ medianIKD +
+                 percent95IKD +
+                 madIKD +
+                 autocorrectRate +
+                 backspaceRate +
+                 totalKeyPresses +
+                 active +
+                 upright +
+                 (1 | subject),
+               data = dat_c1)
+
+anova(m5.X1, m5.X1.1, refit = FALSE)
+```
+
+Week within subject seems to be a significant addition to the model fit.
+
+Just a quick check to see if bed would have been a significant addition to the model:
+
+```{r}
+m5.X1.2 <- lmer(X1 ~ medianIKD +
+                 percent95IKD +
+                 madIKD +
+                 autocorrectRate +
+                 backspaceRate +
+                 totalKeyPresses +
+                 active +
+                 upright +
+                 bed +
+                 (1 | subject / week),
+               data = dat_c1)
+
+anova(m5.X1, m5.X1.2, refit = TRUE)
+```
+
+It would not; perfect.
+
+How about a random effect of month within subject?
+
+```{r}
+dat_c1_m <- dat_c1 %>%
+  mutate(month = month(date))
+
+m5.X1.1.1 <- lmer(X1 ~ medianIKD +
+                   percent95IKD +
+                   madIKD +
+                   autocorrectRate +
+                   backspaceRate +
+                   totalKeyPresses +
+                   active +
+                   upright +
+                   (1 | subject / week),
+                 data = dat_c1_m)
+
+m5.X1.1.2 <- lmer(X1 ~ medianIKD +
+                   percent95IKD +
+                   madIKD +
+                   autocorrectRate +
+                   backspaceRate +
+                   totalKeyPresses +
+                   active +
+                   upright +
+                   (1 | subject / week) +
+                   (1 | subject:month),
+                 data = dat_c1_m)
+
+anova(m5.X1.1.1, m5.X1.1.2, refit = TRUE)
+```
+
+```{r}
+m5.X1.1.1
+```
+
+
+```{r}
+summary(m5.X1.1.2)
+```
+
+### Fixed-effect backwards fitting for IC 1
+
+```{r}
+m5.X1.3 <- update(m5.X1, X1 ~ mean_accuracy + 
+                           medianIKD +
+                           percent95IKD +
+                           madIKD +
+                           autocorrectRate +
+                           backspaceRate +
+                           totalKeyPresses +
+                           active +
+                           (1 | subject / week))
+anova(m5.X1, m5.X1.3)
+```
+
+```{r}
+m5.X1.4 <- update(m5.X1.3, X1 ~ mean_accuracy + 
+                             medianIKD +
+                             percent95IKD +
+                             madIKD +
+                             autocorrectRate +
+                             backspaceRate +
+                             active +
+                             (1 | subject / week))
+
+anova(m5.X1.3, m5.X1.4)
+```
+
+```{r}
+m5.X1.5 <- update(m5.X1.4, X1 ~ mean_accuracy + 
+                             medianIKD +
+                             percent95IKD +
+                             madIKD +
+                             autocorrectRate +
+                             active +
+                             (1 | subject / week))
+
+anova(m5.X1.4, m5.X1.5)
+```
+
+```{r}
+m5.X1.6 <- update(m5.X1.5, X1 ~ mean_accuracy + 
+                             medianIKD +
+                             percent95IKD +
+                             madIKD +
+                             active +
+                             (1 | subject / week))
+
+anova(m5.X1.5, m5.X1.6)
+```
+
+```{r}
+m5.X1.7 <- update(m5.X1.6, X1 ~ mean_accuracy + 
+                             medianIKD +
+                             percent95IKD +
+                             active +
+                             (1 | subject / week))
+
+anova(m5.X1.6, m5.X1.7)
+```
+
+```{r}
+m5.X1.8 <- update(m5.X1.7, X1 ~ mean_accuracy + 
+                             medianIKD +
+                             active +
+                             (1 | subject / week))
+
+anova(m5.X1.7, m5.X1.8)
+```
+
+```{r}
+m5.X1.9 <- update(m5.X1.8, X1 ~ mean_accuracy + 
+                             active +
+                             (1 | subject / week))
+
+anova(m5.X1.8, m5.X1.9)
+```
+
+```{r}
+m5.X1.10 <- update(m5.X1.9, X1 ~ active +
+                              (1 | subject / week))
+
+anova(m5.X1.9, m5.X1.10)
+```
+
+```{r}
+m5.X1.11 <- update(m5.X1.10, X1 ~ (1 | subject / week))
+
+anova(m5.X1.10, m5.X1.11)
+```
+
+```{r}
+m5.X1.12 <- update(m5.X1.10, X1 ~ active - 1 +
+                              (1 | subject / week))
+
+anova(m5.X1.10, m5.X1.12)
+```
+
+Final model:
+
+```{r}
+summary(m5.X1.10)
+```
+
+```{r}
+m5.X1.10.nlme <- lme(X1 ~ active, dat_c1_m, ~ 1 | subject / week)
+m5.X1.10.nlme
+```
+
+```{r paged.print=FALSE}
+summ <- summary(m5.X1.10.nlme)
+summ
+```
+
+```{r}
+summ$tTable
+```
+
+
+### Other ICs
+
+Now rinse and repeat for the other ICs.
+
+```{r}
+m5.all <- dat_c1 %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(refit(m5.X1, .x, rename.response = TRUE))))
+
+m5.all
+```
+
+```{r}
+saveRDS(m5.all, file.path(dat_dir, "ic_5_models.rds"))
+```
+
+
+```{r}
+lapply(m5.all, function(m) summary(m[[1]]))
+```
+
+```{r fig.height=10}
+lapply(m5.all, function(m) {
+  m <- m[[1]]
+  resp <- formula(m)[[2]]
+  plot(m, rlang::inject(!!resp ~ fitted(.) | subject), abline = c(0, 1))
+})
+```
+
+```{r fig.height=8}
+mix_df <- data.frame(icas$`5`$A) %>%
+  rename_with(function(x) colnames(dat_sr)[3:ncol(dat_sr)]) %>%
+  add_column(ic = 1:nrow(icas$`5`$A), .before = 1) %>%
+  pivot_longer(!ic, names_to = "variable", values_to = "loading")
+
+for (i in 1:ncol(m5.all)) {
+  m <- m5.all[[i]][[1]]
+  c <- capture.output(
+    round(summary(m)$coefficients, 2)
+  )
+  # print(summary(m))
+  
+  g <- ggplot(mix_df %>% filter(ic == i), aes(loading, variable, fill = loading)) +
+    geom_col() +
+    scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                         name = "Loading") +
+    geom_label(x = 0.5,
+               y = "wishsleep",
+               hjust = "left",
+               vjust = "top",
+               fill = "white",
+               family = "mono",
+               size = 4,
+               label = paste(c, collapse = "\n")) +
+    xlim(-0.5, 1.5) +
+    xlab("Loading")
+  
+  print(g)
+}
+```
+
+```{r fig.height=10}
+mix_df <- data.frame(icas$`5`$A) %>%
+  rename_with(function(x) colnames(dat_sr)[3:ncol(dat_sr)]) %>%
+  add_column(ic = 1:nrow(icas$`5`$A), .before = 1) %>%
+  pivot_longer(!ic, names_to = "variable", values_to = "loading")
+
+summ_coeffs <- lapply(m5.all, function(m) {
+  m <- m[[1]]
+  paste(
+    capture.output(
+      round(summary(m)$coefficients[,-2], 2)
+    ),
+    collapse = "\n"
+  )
+})
+
+coeff_df <- data.frame(ic = 1:5, text = as.vector(summ_coeffs, mode = "character"))
+
+ggplot(mix_df, aes(loading, variable, fill = loading)) +
+  geom_col() +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  geom_label(aes(label = text),
+             x = 1,
+             y = "wishsleep",
+             hjust = "left",
+             vjust = "top",
+             fill = "white",
+             family = "mono",
+             size = 3.5,
+             data = coeff_df) +
+  xlim(-0.5, 4.5) +
+  facet_wrap(~ ic, nrow = 2) +
+  xlab("Loading")
+```
+
+```{r}
+ggplot(dats_c[[1]], aes(active, X1)) +
+  geom_point(alpha = 1)
+
+ggplot(dats_c[[1]], aes(totalKeyPresses, X3)) +
+  geom_point(alpha = 1)
+```
+
+
+
+
+```{r}
+dat_c1_active <- dat_c1 %>%
+  # add_column(fitted = fitted(m5.all[[1]][[1]])) %>%
+  select(subject, date, X1, active) %>%
+  pivot_longer(c(X1, active), "variable")
+
+dat_c1_active
+```
+
+```{r fig.height=10}
+ggplot(dat_c1_active, aes(date, value)) +
+  geom_line(aes(color = variable)) +
+  facet_wrap(~ subject, scales = "free_x")
+
+ggplot(dat_c1_active %>% filter(subject == "3030"), aes(date, value)) +
+  geom_line(aes(color = variable))
+```
+
+
+### Other ICs - NLME
+
+NLME gives us p-values, necessary if we want to do multiple comparisons corrections.
+
+```{r}
+m5.X1.nlme <- lme(X1 ~ medianIKD +
+                   percent95IKD +
+                   madIKD +
+                   autocorrectRate +
+                   backspaceRate +
+                   totalKeyPresses +
+                   active +
+                   upright,
+                 random = ~ 1 | subject / week,
+                 data = dat_c1)
+
+m5.all.nlme <- dat_c1 %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(update(m5.X1.nlme, reformulate(".", cur_column())))))
+
+m5.all.nlme
+```
+
+```{r paged.print=FALSE}
+lapply(m5.all.nlme, function(m) summary(m[[1]]))
+```
+
+Get beta and significance values nicely formatted for copying into Word table.
+
+```{r}
+print_estimates <- function(models) {
+  for (m in models) {
+    summ <- summary(m[[1]])
+    tab <- summ$tTable
+    for (i in 1:nrow(tab)) {
+      v1 <- signif(tab[i, 1], 2)
+      v2 <- signif(tab[i, 5], 2)
+      cat(str_glue("{v1}\t{v2}\n\n"))
+    }
+    
+    cat("\n------------------------\n\n")
+  }
+}
+
+print_estimates(m5.all.nlme)
+```
+
+Get Bonferroni-corrected p values.
+
+```{r}
+lapply(m5.all.nlme, function(m) {
+  summ <- summary(m[[1]])
+  tab <- summ$tTable
+  for (i in 1:nrow(tab)) {
+    cat(paste0(signif(min(tab[i,5] * 5 * 8, 1), 2), "\n"))
+  }
+  cat("\n")
+})
+```
+
+```{r}
+estimates_to_csv(file.path(dat_dir, "m5_nlme_p.csv"), 
+                 m5.all.nlme, 
+                 include_corrected = TRUE)
+```
+
+
+Check significance of random effects.
+
+```{r}
+lapply(m5.all.nlme, function(m) {
+  m <- m[[1]]
+  m_noweek <- update(m, random = ~ 1 | subject)
+  
+  anova(m, m_noweek)
+})
+```
+
+Check for heteroskedasticity of residuals.
+
+```{r}
+lapply(m5.all.nlme, function(m) plot(m[[1]]))
+```
+
+Normality of residuals.
+
+```{r}
+lapply(m5.all.nlme, function(m) {
+  m <- m[[1]]
+  qqnorm(resid(m))
+  qqline(resid(m))
+})
+```
+
+Subject-level random effects.
+
+```{r}
+lapply(m5.all.nlme, function(m) {
+  m <- m[[1]]
+  refs <- ranef(m, level = 1)[[1]]
+  qqnorm(refs)
+  qqline(refs)
+})
+```
+
+Week-within-subjects-level random effects.
+
+```{r}
+lapply(m5.all.nlme, function(m) {
+  m <- m[[1]]
+  refs <- ranef(m, level = 2)[[1]]
+  qqnorm(refs)
+  qqline(refs)
+})
+```
+
+## 10 components
+
+```{r}
+dat_c2 <- dats_c[[2]]
+```
+
+```{r}
+m10.X1 <- lmer(X1 ~ medianIKD +
+                 percent95IKD +
+                 madIKD +
+                 autocorrectRate +
+                 backspaceRate +
+                 totalKeyPresses +
+                 active +
+                 upright +
+                 (1 | subject / week),
+               data = dat_c2)
+
+m10.X1
+```
+
+```{r}
+m10.all <- dat_c2 %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(refit(m10.X1, .x, rename.response = TRUE))))
+
+m10.all
+```
+
+```{r}
+lapply(m10.all, function(m) summary(m[[1]]))
+```
+
+```{r fig.height=8}
+mix_df <- data.frame(icas$`10`$A) %>%
+  rename_with(function(x) colnames(dat_sr)[3:ncol(dat_sr)]) %>%
+  add_column(ic = 1:nrow(icas$`10`$A), .before = 1) %>%
+  pivot_longer(!ic, names_to = "variable", values_to = "loading")
+
+for (i in 1:ncol(m10.all)) {
+  m <- m10.all[[i]][[1]]
+  c <- capture.output(
+    round(summary(m)$coefficients, 2)
+  )
+  # print(summary(m))
+  
+  g <- ggplot(mix_df %>% filter(ic == i), aes(loading, variable, fill = loading)) +
+    geom_col() +
+    scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                         name = "Loading") +
+    geom_label(x = 0.5,
+               y = "wishsleep",
+               hjust = "left",
+               vjust = "top",
+               fill = "white",
+               family = "mono",
+               size = 4,
+               label = paste(c, collapse = "\n")) +
+    xlim(-0.5, 1.5) +
+    xlab("Loading")
+  
+  print(g)
+}
+```
+
+```{r}
+summ_coeffs <- lapply(m10.all, function(m) {
+  m <- m[[1]]
+  paste(
+    capture.output(
+      round(summary(m)$coefficients[,-2], 2)
+    ),
+    collapse = "\n"
+  )
+})
+
+coeff_df <- data.frame(ic = 1:10, text = as.vector(summ_coeffs, mode = "character"))
+
+str(coeff_df)
+```
+
+```{r fig.height=10}
+ggplot(mix_df, aes(loading, variable, fill = loading)) +
+  geom_col() +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  geom_label(aes(label = text),
+             x = 0.5,
+             y = "wishsleep",
+             hjust = "left",
+             vjust = "top",
+             fill = "white",
+             family = "mono",
+             size = 2.5,
+             data = coeff_df) +
+  xlim(-0.5, 4.5) +
+  facet_wrap(~ ic, nrow = 2) +
+  xlab("Loading")
+```
+
+### NLME
+
+```{r}
+m10.X1.nlme <- lme(X1 ~ medianIKD +
+                     percent95IKD +
+                     madIKD +
+                     autocorrectRate +
+                     backspaceRate +
+                     totalKeyPresses +
+                     active +
+                     upright,
+                   random = ~ 1 | subject / week,
+                   data = dat_c2)
+
+m10.all.nlme <- dat_c2 %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(update(m10.X1.nlme, reformulate(".", cur_column())))))
+
+m10.all.nlme
+```
+
+
+```{r}
+print_estimates_hor <- function(models) {
+  for (m in models) {
+    summ <- summary(m[[1]])
+    tab <- summ$tTable
+    
+    v1s <- sapply(1:nrow(tab), function(i) signif(tab[i, 1], 2))
+    v2s <- sapply(1:nrow(tab), function(i) signif(tab[i, 5], 2))
+    
+    str1 <- paste(rev(v1s), sep = " ")
+    str2 <- paste(rev(v2s), sep = " ")
+    
+    cat(str1, "\n")
+    cat(str2, "\n")
+    
+    cat("\n------------------------\n\n")
+  }
+}
+
+sig_zeros <- function(x) str_replace(sprintf("%#.2g", x), "\\.", "·")
+
+print_estimates_word <- function(models) {
+  terms <- c("medianIKD", "percent95IKD", "madIKD", "autocorrectRate",
+             "backspaceRate", "totalKeyPresses", "active", "upright")
+  
+  for (i in 1:length(terms)) {
+    cat("\n", terms[i], "\n")
+    
+    term_ests <- lapply(models, function(m) {
+      summ <- summary(m[[1]])
+      tab <- summ$tTable
+      
+      beta <- sig_zeros(tab[terms[i], 1])
+      p_val <- sig_zeros(tab[terms[i], 5])
+      
+      paste(beta, p_val, sep = "\n")
+    })
+    
+    cat(paste(term_ests, collapse = "\n"), "\n")
+  }
+}
+
+estimates_to_csv(file.path(dat_dir, "m10_nlme_p.csv"), m10.all.nlme, TRUE)
+```
+
+```{r}
+lapply(m10.all.nlme, function(m) {
+  summ <- summary(m[[1]])
+  tab <- summ$tTable
+  for (i in 1:nrow(tab)) {
+    cat(paste0(rownames(tab)[i], ": ", signif(min(tab[i,5] * 10 * 8, 1), 2), "\n"))
+  }
+  cat("\n")
+})
+```
+
+
+### Checking model assumptions
+
+Check for heteroskedasticity of residuals.
+
+```{r}
+lapply(m10.all.nlme, function(m) plot(m[[1]]))
+```
+
+Normality of residuals.
+
+```{r}
+lapply(m10.all.nlme, function(m) {
+  m <- m[[1]]
+  qqnorm(resid(m))
+  qqline(resid(m))
+})
+```
+
+Subject-level random effects.
+
+```{r}
+lapply(m10.all.nlme, function(m) {
+  m <- m[[1]]
+  refs <- ranef(m, level = 1)[[1]]
+  qqnorm(refs)
+  qqline(refs)
+})
+```
+
+Week-within-subjects-level random effects.
+
+```{r}
+lapply(m10.all.nlme, function(m) {
+  m <- m[[1]]
+  refs <- ranef(m, level = 2)[[1]]
+  qqnorm(refs)
+  qqline(refs)
+})
+```
+
+## 20 components
+
+```{r}
+dat_c3 <- dats_c[[3]]
+```
+
+```{r}
+m20.X1 <- lmer(X1 ~ medianIKD +
+                 percent95IKD +
+                 madIKD +
+                 autocorrectRate +
+                 backspaceRate +
+                 totalKeyPresses +
+                 active +
+                 upright +
+                 (1 | subject / week),
+               data = dat_c3)
+
+m20.X1
+```
+
+```{r}
+m20.all <- dat_c3 %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(refit(m20.X1, .x, rename.response = TRUE))))
+
+m20.all
+```
+
+```{r fig.height=8}
+mix_df <- data.frame(icas$`20`$A) %>%
+  rename_with(function(x) colnames(dat_sr)[3:ncol(dat_sr)]) %>%
+  add_column(ic = 1:nrow(icas$`20`$A), .before = 1) %>%
+  pivot_longer(!ic, names_to = "variable", values_to = "loading")
+
+for (i in 1:ncol(m20.all)) {
+  m <- m20.all[[i]][[1]]
+  c <- capture.output(
+    round(summary(m)$coefficients, 2)
+  )
+  # print(summary(m))
+  
+  g <- ggplot(mix_df %>% filter(ic == i), aes(loading, variable, fill = loading)) +
+    geom_col() +
+    scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                         name = "Loading") +
+    geom_label(x = 0.5,
+               y = "wishsleep",
+               hjust = "left",
+               vjust = "top",
+               fill = "white",
+               family = "mono",
+               size = 4,
+               label = paste(c, collapse = "\n")) +
+    xlim(-0.5, 1.5) +
+    xlab("Loading")
+  
+  print(g)
+}
+```
+
+```{r fig.height=10}
+mix_df <- data.frame(icas$`20`$A) %>%
+  rename_with(function(x) colnames(dat_sr)[3:ncol(dat_sr)]) %>%
+  add_column(ic = 1:nrow(icas$`20`$A), .before = 1) %>%
+  pivot_longer(!ic, names_to = "variable", values_to = "loading")
+
+summ_coeffs <- lapply(m20.all, function(m) {
+  m <- m[[1]]
+  ts <- round(summary(m)$coefficients[,3], 2)
+  paste(
+    paste(
+      c("Int", "acc", "ikd", "95i", "mad", "aut", "bac", "key", "act", "upr"),
+      ts
+    ),
+    collapse = "\n"
+  )
+})
+
+coeff_df <- data.frame(ic = 1:20, text = as.vector(summ_coeffs, mode = "character"))
+
+ggplot(mix_df, aes(loading, variable, fill = loading)) +
+  geom_col() +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  geom_label(aes(label = text),
+             x = 0.5,
+             y = "wishsleep",
+             hjust = "left",
+             vjust = "top",
+             fill = "white",
+             family = "mono",
+             size = 2.5,
+             data = coeff_df) +
+  xlim(-0.5, 2) +
+  facet_wrap(~ ic, nrow = 2) +
+  xlab("Loading")
+```
+
+### NLME
+
+```{r}
+m20.X1.nlme <- lme(X1 ~ medianIKD +
+                     percent95IKD +
+                     madIKD +
+                     autocorrectRate +
+                     backspaceRate +
+                     totalKeyPresses +
+                     active +
+                     upright,
+                   random = ~ 1 | subject / week,
+                   data = dat_c3)
+
+m20.all.nlme <- dat_c3 %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(update(m20.X1.nlme, reformulate(".", cur_column())))))
+
+m20.all.nlme
+```
+
+```{r}
+print_estimates_word(m20.all.nlme)
+```
+
+Bonferroni-corrected p-values.
+
+```{r}
+lapply(m20.all.nlme, function(m) {
+  summ <- summary(m[[1]])
+  tab <- summ$tTable
+  for (i in 1:nrow(tab)) {
+    cat(paste0(rownames(tab)[i], ": ", signif(min(tab[i,5] * 20 * 8, 1), 2), "\n"))
+  }
+  cat("\n")
+})
+```
+
+### Checking model assumptions
+
+Check for heteroskedasticity of residuals.
+
+```{r}
+lapply(m20.all.nlme, function(m) plot(m[[1]]))
+```
+
+Normality of residuals.
+
+```{r}
+lapply(m20.all.nlme, function(m) {
+  m <- m[[1]]
+  qqnorm(resid(m))
+  qqline(resid(m))
+})
+```
+
+Subject-level random effects.
+
+```{r}
+lapply(m20.all.nlme, function(m) {
+  m <- m[[1]]
+  refs <- ranef(m, level = 1)[[1]]
+  qqnorm(refs)
+  qqline(refs)
+})
+```
+
+Week-within-subjects-level random effects.
+
+```{r}
+lapply(m20.all.nlme, function(m) {
+  m <- m[[1]]
+  refs <- ranef(m, level = 2)[[1]]
+  qqnorm(refs)
+  qqline(refs)
+})
+```
+
+
