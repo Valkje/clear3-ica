@@ -1,7 +1,15 @@
 *.csv
+*.xlsx
+*.txt
+*.rtf
+*.Rproj
+*jvsc*.ipynb
+.*
+images/
 synapse_output/
 getKeypress_fromHealthIDs_blankTemplate.py
 keypress_preprocessing_blankTemplate.py
 ._*
 *.knit.md
 *.nb.html
+.Rproj.user
