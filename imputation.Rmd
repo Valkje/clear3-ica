@@ -54,6 +54,21 @@ print(summary(tab1))
 options(max.print = max.print)
 ```
 
+Examine the proportion of missing entries for the BiAffect variables per subject.
+
+```{r}
+miss_props <- dat_reg %>%
+  group_by(subject) %>%
+  summarize(across(medianIKD:mean_accuracy, ~ mean(is.na(.x))))
+
+miss_props
+```
+
+```{r}
+mean(complete.cases(dat_reg))
+```
+
+
 Partition index and date should be removed before imputation, as they are nothing more than administrative data.
 
 ```{r}
@@ -289,6 +304,33 @@ save(imp_merged, file = file.path(dat_dir, "imp_merged_tdia_30_blocked.rda"))
 load(file.path(dat_dir, "imp_merged_tdia_30_blocked.rda"))
 ```
 
+Let's examine variability per variable and subject for the BiAffect variables.
+
+```{r}
+biaffect_means <- mice::complete(imp_merged, "long") %>%
+  select(c(.imp, subject:mean_accuracy)) %>%
+  pivot_longer(medianIKD:mean_accuracy, names_to = "variable") %>%
+  group_by(.imp, variable) %>%
+  mutate(value = scale(value)) %>%
+  group_by(.imp, subject, variable) %>%
+  summarize(value = mean(value)) %>%
+  group_by(subject, variable) %>%
+  summarize(
+    sd = sd(value),
+    mean = mean(value)
+  )
+
+biaffect_means
+```
+
+```{r fig.height=15}
+ggplot(biaffect_means, aes(subject, mean)) +
+  geom_col(fill = "steelblue") +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), width = 0.2) +
+  facet_wrap(~ variable)
+```
+
+
 # Multilevel imputation
 
 The subjects form structure in our data, a.k.a. clusters. Using single-level methods for multiple imputation "can be more hazardous than listwise deletion", so we should think about multilevel methods. These multilevel methods often involve mixed-effects imputation models. I at first thought that fitting mixed models for every variable in the data set would be very computationally expensive, but apparently it's not that bad. We are using linear mixed effects + PMM imputation models for all variables.
@@ -305,7 +347,7 @@ qpred_multi[qpred_multi == 1] <- 3 # + covariate's cluster mean
 Instead of global mean-centering/scaling, we could also do subject-specific mean-centering/scaling. This might combat issues such as that certain persons don't ever use the extreme ends of a Likert scale, while some other do.
 
 ```{r}
-sub_scaling <- TRUE
+sub_scaling <- FALSE
 
 if (sub_scaling) {
   sub_centers <- dat_reg %>%
@@ -489,4 +531,222 @@ xyplot(imp_multi, numdrinks_yest ~ ps | as.factor(.imp),
        ylab = "Number of drinks yesterday (scaled)", pch = c(1, 19), 
        col = mdc(1:2))
 ```
+
+# Multilevel imputation with weekly TDIAs
+
+```{r}
+load(file.path(dat_dir, "dat_reg_weekly_tdia_30_blocked.rda"))
+```
+
+```{r}
+dat_reg <- dat_reg %>%
+  select(!c(date, partition_idx))
+
+dat_reg
+```
+
+
+```{r}
+qpred_mat <- quickpred(dat_reg, 
+                       method = "spearman", 
+                       include = c("mean_accuracy"),
+                       exclude = c("subject", "week"))
+
+print(table(rowSums(qpred_mat)))
+mean(rowSums(qpred_mat))
+```
+
+
+```{r}
+qpred_weekly <- qpred_mat
+qpred_weekly[,"subject"] <- -2 # Third-level cluster variable
+qpred_weekly[,"week"] <- -2 # Second-level cluster variable
+qpred_weekly["subject", "subject"] <- 0 # subject itself does not need to be imputed
+qpred_weekly["week", "week"] <- 0 # Same for week
+qpred_weekly[qpred_weekly == 1] <- 3 # + covariate's cluster mean
+```
+
+```{r}
+should.rescale <- sapply(dat_reg, typeof) == "double"
+should.rescale["totalKeyPresses"] <- TRUE
+should.rescale["week"] <- FALSE
+
+scaled <- scale(dat_reg[,should.rescale])
+centers <- attr(scaled, "scaled:center")
+scales <- attr(scaled, "scaled:scale")
+save(centers, scales, file = file.path(dat_dir, "dat_reg_scales_weekly_tdia.rda"))
+
+dat_reg_scaled <- dat_reg
+dat_reg_scaled[,should.rescale] <- scaled
+
+dat_reg_scaled$subject <- as.integer(dat_reg_scaled$subject)
+```
+
+# Multilevel imputation with removal of subjects
+
+```{r}
+load(file.path(dat_dir, "dat_reg_tdia_30_blocked.rda"))
+
+miss_props <- dat_reg %>%
+  group_by(subject) %>%
+  summarize(across(medianIKD:n_stressors, ~ mean(is.na(.x)))) %>%
+  rowwise() %>%
+  summarize(
+    subject,
+    biaffect = mean(c_across(medianIKD:mean_accuracy)),
+    self_report = mean(c_across(menstrualbleeding:n_stressors))
+  )
+
+miss_props
+```
+
+Remove subjects which have >=80% of their BiAffect and/or self-report data missing. Something else that differs from our classical multilevel imputations given above is that we remove mhpYN_0 (because it is redundant w.r.t. mhpYN_1 and mhpYN_2) and we set the `888` values of NSSIyn to `NA`.
+
+```{r}
+miss_subs <- filter(miss_props, biaffect >= 0.8 | self_report >= 0.8)$subject
+
+# Cleaned regression data
+dat_reg_cln <- dat_reg %>%
+  filter(!(subject %in% miss_subs)) %>%
+  select(!c(partition_idx, date, mhpYN_0)) %>%
+  mutate(NSSIyn = droplevels(na_if(NSSIyn, "888")))
+
+max.print <- options("max.print")$max.print
+options(max.print = 10 * max.print)
+
+tab1 <- CreateTableOne(data = dat_reg_cln)
+print(summary(tab1))
+
+options(max.print = max.print)
+```
+
+```{r}
+qpred_mat <- quickpred(dat_reg_cln, 
+                       method = "spearman", 
+                       include = c("mean_accuracy"),
+                       exclude = c("subject"))
+
+print(table(rowSums(qpred_mat)))
+print(mean(rowSums(qpred_mat)))
+
+qpred_multi <- qpred_mat
+qpred_multi[,"subject"] <- -2 # Cluster variable
+qpred_multi["subject", "subject"] <- 0 # subject itself does not need to be imputed
+qpred_multi[qpred_multi == 1] <- 3 # + covariate's cluster mean
+```
+
+
+```{r}
+should.rescale <- sapply(dat_reg_cln, typeof) == "double"
+should.rescale["totalKeyPresses"] <- TRUE
+
+scaled <- scale(dat_reg_cln[,should.rescale])
+centers <- attr(scaled, "scaled:center")
+scales <- attr(scaled, "scaled:scale")
+# save(centers, scales, file = file.path(dat_dir, "dat_reg_scales_weekly_tdia.rda"))
+
+dat_reg_cln_scl <- dat_reg_cln
+dat_reg_cln_scl[,should.rescale] <- scaled
+
+dat_reg_cln_scl$subject <- as.integer(dat_reg_cln_scl$subject)
+
+dat_reg_cln_scl
+```
+
+```{r}
+n_threads <- 10
+
+cl <- makeCluster(n_threads)
+clusterSetRNGStream(cl, NULL) # Make sure every node uses a different RNG stream
+
+clusterExport(cl, c("dat_reg_cln_scl", "qpred_multi", "mice.impute.2l.pmm"))
+clusterEvalQ(cl, library(mice))
+
+start <- Sys.time()
+
+imp_pars <- parLapply(cl, 1:n_threads, function(x) {
+  mice(dat_reg_cln_scl, 
+       m = 5, 
+       predictorMatrix = qpred_multi, 
+       method = "2l.pmm",
+       maxit = 20,
+       ridge = 0.001,
+       printFlag = FALSE)
+})
+
+print(Sys.time() - start)
+
+stopCluster(cl)
+```
+
+```{r}
+imp_multi_cln <- reduce(imp_pars, ibind)
+```
+
+```{r}
+imp_multi_cln$loggedEvents
+```
+
+```{r}
+saveRDS(imp_multi_cln, file.path(dat_dir, "imp_multi_cln_tdia_30_blocked.rds"))
+```
+
+```{r}
+imp_multi_cln <- readRDS(file.path(dat_dir, "imp_multi_cln_tdia_30_blocked.rds"))
+```
+
+```{r fig.height=15}
+plot(imp_multi_cln)
+```
+
+
+```{r}
+mice::bwplot(imp_multi_cln, mean_accuracy)
+```
+
+```{r fig.height=10, fig.width=10}
+densityplot(imp_multi_cln, ~ mean_accuracy)
+```
+
+```{r fig.height=10, fig.width=20}
+cols <- colnames(dat_reg_cln)
+ds <- vector("list", length(cols) - 1)
+
+pb <- txtProgressBar(max = length(ds), style = 3)
+
+for (i in 2:length(cols)) {
+  ds[[i - 1]] <- densityplot(imp_multi_cln, as.formula(str_glue("~ {cols[i]}")))
+  setTxtProgressBar(pb, i-1)
+}
+
+close(pb)
+
+g <- ggarrange(plotlist = ds)
+ggsave("images/imputation/imp_multilevel_cln.png", g, 
+       width = 2*1920, height = 2*1080, units = "px", dpi = 100)
+```
+
+```{r fig.height=15}
+biaffect_means <- mice::complete(imp_multi_cln, "long") %>%
+  select(c(.imp, subject:mean_accuracy)) %>%
+  pivot_longer(medianIKD:mean_accuracy, names_to = "variable") %>%
+  group_by(.imp, variable) %>%
+  mutate(subject = as.factor(subject)) %>%
+  group_by(.imp, subject, variable) %>%
+  summarize(value = mean(value)) %>%
+  group_by(subject, variable) %>%
+  summarize(
+    sd = sd(value),
+    mean = mean(value)
+  )
+
+ggplot(biaffect_means, aes(subject, mean)) +
+  geom_col(fill = "steelblue") +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), width = 0.2) +
+  ylab("Mean across imputations (± SD)") +
+  facet_wrap(~ variable) +
+  theme(text = element_text(size = 18),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 10))
+```
+
 
