@@ -1,0 +1,327 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+local <- TRUE
+
+wd <- ""
+
+if (!local) {
+  # Cluster environment
+  wd <- "~/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
+} else {
+  wd <- "/Volumes/home/preclineu/lorkno/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "~/HPC_project/data"
+}
+
+model_dir <- file.path(dat_dir, "complete_data_models")
+
+# For some reason this sets the pwd only for the current scope, which means it 
+# does not affect anything outside an if block if you set it there.
+# So that's why it's here instead of above.
+setwd(wd) 
+
+source("src/load_dependencies.R")
+library(fastICA)
+
+# Because it's required by the Lancet
+options(OutDec = "·")
+```
+
+# Get/set seed
+
+I would like to avoid setting the seed manually. I'll record my seed from today (14-06-2023) and use that in later runs of this script.
+
+```{r}
+# if(!exists(".Random.seed")) set.seed(NULL)
+# seed <- .Random.seed
+# saveRDS(seed, file.path(dat_dir, "sens_seed.rds"))
+
+seed <- readRDS(file.path(dat_dir, "sens_seed.rds"))
+```
+
+# Prepare ICAs
+
+For now, only do the 5-component solution.
+
+```{r}
+replicate_icas <- function(dat_path, n = 100, out_path = NULL) {
+  set.seed(seed)
+  
+  ### Data prep
+  
+  dat_reg <- readRDS(dat_path)
+  
+  dat_reg_sr <- dat_reg %>%
+    filter(modality == "self_report", !is.na(value)) %>%
+    select(!c(study_start_date, treatment_start_date, modality)) %>%
+    group_by(variable) %>%
+    mutate(
+      logged = case_when(
+        min(value) == 0 ~ log(value + 1), # To prevent log(0) = NA values
+        TRUE ~ log(value)
+      ),
+      scaled = scale(value)
+    ) %>%
+    ungroup()
+  
+  df <- dat_reg_sr %>%
+    select(!c(value, scaled)) %>% 
+    pivot_wider(names_from = variable, values_from = logged) %>%
+    arrange(subject, date) 
+  
+  subs <- df$subject
+  dates <- df$date
+  
+  df <- df %>%
+    select(!c(subject, date))
+  
+  # t x q
+  mat <- sapply(df, as.vector)
+  
+  means <- colMeans(mat)
+  
+  ### Running the ICAs
+  
+  icas <- replicate(
+    n = n, 
+    fastICA(mat, n.comp = 5, alg.typ = "parallel", fun = "logcosh"),
+    simplify = FALSE
+  )
+  
+  ls <- list(icas = icas, subs = subs, dates = dates)
+  
+  if (!is.null(out_path))
+    saveRDS(ls, file = out_path)
+  
+  ls
+}
+
+ls <- replicate_icas(file.path(dat_dir, "dat_reg_semi_contiguous.rds"),
+                     out_path = file.path(dat_dir, "icas_sens.rds"))
+
+icas <- ls$icas
+subs <- ls$subs
+dates <- ls$dates
+```
+
+We use sens_helper.R to mark the general affect components and save the marked component indices to general_idx_sens.rds.
+
+```{r}
+general_idx <- readRDS(file.path(dat_dir, "general_idx_sens.rds"))
+general_idx <- as.integer(general_idx)
+```
+
+# Run models
+
+Prepare data.
+
+```{r}
+prep_reg_dat <- function(dat_path, icas, subs, dates, general_idx) {
+  # Semi-contiguous data
+  dat_reg <- readRDS(dat_path)
+  
+  dat_bi <- dat_reg %>%
+    filter(modality == "biaffect") %>%
+    select(!c(study_start_date, treatment_start_date, modality)) %>%
+    pivot_wider(names_from = variable, values_from = value) %>%
+    select(!partition_idx)
+  
+  # Select components that correspond to general affect components
+  dats <- map2(icas, general_idx, function(ica, idx) {
+    data.frame(X = ica$S[,idx]) %>%
+      add_column(subject = subs, date = dates) %>%
+      inner_join(dat_bi, by = c("subject", "date")) %>%
+      mutate(
+        week = week(date),
+        sub_week = paste(subject, week, sep = " - ") # For convenience
+      ) %>%
+      relocate(subject, date, week, sub_week, .before = X)
+  })
+  
+  dats_f <- lapply(dats, function(dat) {
+    dat %>%
+      group_by(sub_week) %>%
+      filter(n() > 1) %>%
+      ungroup()
+  })
+  
+  dats_c <- lapply(dats_f, function(dat) {
+    dat %>%
+      mutate(
+        totalKeyPresses = log(totalKeyPresses),
+        across(medianIKD:mean_accuracy, scale)
+      )
+  })
+  
+  dats_c
+}
+
+dats_c <- prep_reg_dat(file.path(dat_dir, "dat_reg_semi_contiguous.rds"),
+                       icas, subs, dates,
+                       general_idx)
+```
+
+Create models.
+
+```{r}
+models <- lapply(dats_c, function(dat_c) {
+  lme(X ~ medianIKD +
+        percent95IKD +
+        madIKD +
+        autocorrectRate +
+        backspaceRate +
+        totalKeyPresses +
+        active +
+        upright,
+      random = ~ 1 | subject / week,
+      data = dat_c)
+})
+```
+
+Extract p values.
+
+```{r}
+p_vals <- sapply(models, function(m) {
+  summary(m)$tTable[,5]
+})
+
+p_val_df <- data.frame(t(p_vals)) %>%
+  pivot_longer(everything(), names_to = "variable") %>%
+  filter(variable != "X.Intercept.")
+
+p_val_df
+```
+
+
+Plot p values.
+
+```{r fig.height=10}
+ggplot(p_val_df, aes(value)) +
+  geom_histogram(bins = 60) +
+  facet_wrap(~ variable, scales = "free_x", labeller = as_labeller(c(
+    medianIKD = "Median IKD",
+    percent95IKD = "95th percentile IKD",
+    madIKD = "MAD IKD",
+    autocorrectRate = "Autocorrect rate",
+    backspaceRate = "Backspace rate",
+    totalKeyPresses = "Total number of key presses",
+    active = "Movement rate",
+    upright = "Upright rate"
+  ))) +
+  ylab("Count") +
+  xlab("p value") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 14, family = "serif"),
+    strip.text = element_text(size = 14, family = "serif"),
+    panel.border = element_rect(fill = NA, color = "grey")
+  )
+```
+
+```{r fig.height=10}
+ggplot(p_val_df, aes(value)) +
+  geom_histogram(bins = 60) +
+  facet_wrap(~ variable, scales = "free_x", labeller = as_labeller(c(
+    medianIKD = "Median IKD",
+    percent95IKD = "95th percentile IKD",
+    madIKD = "MAD IKD",
+    autocorrectRate = "Autocorrect rate",
+    backspaceRate = "Backspace rate",
+    totalKeyPresses = "Total number of key presses",
+    active = "Movement rate",
+    upright = "Upright rate"
+  ))) +
+  ylab("Count") +
+  xlab("p value") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 14, family = "serif"),
+    strip.text = element_text(size = 14, family = "serif"),
+    panel.border = element_rect(fill = NA, color = "grey")
+  )
+```
+
+```{r}
+mean(p_val_df[p_val_df$variable == "active",]$value * 5 * 8 < 0.05)
+```
+
+# Fragmented data
+
+```{r}
+ls <- replicate_icas(file.path(dat_dir, "dat_reg_fragmented.rds"))
+icas_frag <- ls$icas
+subs_frag <- ls$subs
+dates_frag <- ls$dates
+```
+
+```{r fig.height=10}
+fancy_mix_fig(icas_frag[[1]])
+```
+
+Use sens_helper.R to get general_idx_frag.
+
+```{r}
+general_idx_frag <- readRDS(file.path(dat_dir, "general_idx_frag_sens2.rds"))
+general_idx_frag <- as.integer(general_idx_frag)
+
+dats_c_frag <- prep_reg_dat(file.path(dat_dir, "dat_reg_fragmented.rds"),
+                       icas_frag, subs_frag, dates_frag,
+                       general_idx_frag)
+
+models_frag <- lapply(dats_c_frag, function(dat_c) {
+  lme(X ~ medianIKD +
+        percent95IKD +
+        madIKD +
+        autocorrectRate +
+        backspaceRate +
+        totalKeyPresses +
+        active +
+        upright,
+      random = ~ 1 | subject / week,
+      data = dat_c)
+})
+
+p_vals_frag <- sapply(models_frag, function(m) {
+  summary(m)$tTable[,5]
+})
+
+p_val_df_frag <- data.frame(t(p_vals_frag)) %>%
+  pivot_longer(everything(), names_to = "variable") %>%
+  filter(variable != "X.Intercept.")
+```
+
+```{r fig.height=10}
+ggplot(p_val_df_frag, aes(value)) +
+  geom_histogram(bins = 60) +
+  facet_wrap(~ variable, scales = "free_x", labeller = as_labeller(c(
+    medianIKD = "Median IKD",
+    percent95IKD = "95th percentile IKD",
+    madIKD = "MAD IKD",
+    autocorrectRate = "Autocorrect rate",
+    backspaceRate = "Backspace rate",
+    totalKeyPresses = "Total number of key presses",
+    active = "Movement rate",
+    upright = "Upright rate"
+  ))) +
+  ylab("Count") +
+  xlab("p value") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 14, family = "serif"),
+    strip.text = element_text(size = 14, family = "serif"),
+    panel.border = element_rect(fill = NA, color = "grey")
+  )
+```
+
+```{r}
+mean(p_val_df_frag[p_val_df_frag$variable == "active",]$value * 5 * 8 < 0.05)
+```
+
+
+
