@@ -14,7 +14,7 @@ if (!local) {
   # Base directory for the data set we will create
   dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
 } else {
-  wd <- "~/HPC/Documents/Autocorrelation"
+  wd <- "/Volumes/home/preclineu/lorkno/Documents/Autocorrelation"
   # Base directory for the data set we will create
   dat_dir <- "~/HPC_project/data"
 }
@@ -127,7 +127,7 @@ ggplot(melt(biaffect_cors$cor_mat[[102]]), aes(X2, X1)) +
 # Perimenstrual suicidality data
 
 ```{r}
-all_rep_dat <- read_sav("../CLEAR3_Biaffect_Leow/2022-12-05 - CLEAR3 Daily Dataset/clear3daily_20221205.sav")
+all_rep_dat <- read_sav(file.path(dat_dir, "clear3daily_20221205.sav"))
 all_rep_dat <- zap_labels(all_rep_dat)
 all_rep_dat
 ```
@@ -177,6 +177,10 @@ tab1 <- CreateTableOne(data = red_rep_dat)
 print(summary(tab1))
 
 options(max.print = max.print)
+```
+
+```{r}
+complete.cases(red_rep_dat)
 ```
 
 
@@ -533,7 +537,7 @@ all_rep_dat %>%
 # Subject 2D histogram correlation matrices
 
 ```{r}
-ls <- get_partitions(dat_dir)
+ls <- get_partitions(dat_dir, date)
 subjects <- ls$dat$subjects
 dats_kp <- ls$dat$dats_kp
 dats_ses <- ls$dat$dats_ses
@@ -773,5 +777,65 @@ ggarrange(g1, g2, g_tdia_sub, nrow = 3, align = "hv")
 ggsave("images/test_tdia/confusion_matrix_comparison.png")
 ```
 
+# Cutting away non-baseline data
 
+```{r}
+load(file.path(dat_dir, "dat_reg_tdia_30_blocked_expanded_two-handed.rda"))
+```
+
+```{r}
+start_dates <- read_excel(
+  file.path(dat_dir, "CLEAR3_Biaffect_Leow/Metadata/clear3_start_tx_dates.xlsx")) %>%
+  mutate(
+    ID = as.character(ID),
+    study_start_date = as_date(study_start_date),
+    treatment_start_date = as_date(treatment_start_date)
+  )
+
+start_dates
+```
+
+## Regression data
+
+Join start dates with `dat_reg`, then filter out any rows with a date below `study_start_date` and above `treatment_start_date` (if they are present).
+
+```{r}
+dat_reg_trimmed <- dat_reg %>%
+  left_join(start_dates, c("subject" = "ID")) %>%
+  relocate(study_start_date, treatment_start_date, .after = date) %>%
+  filter(date >= study_start_date, is.na(treatment_start_date) | date < treatment_start_date) %>%
+  ungroup()
+
+dat_reg_trimmed %>%
+  filter(subject == "3001", date == ymd("2021-01-02"))
+```
+
+```{r}
+saveRDS(dat_reg_trimmed, file.path(dat_dir, "dat_reg_trimmed_tdia_30_blocked_expanded_two-handed.rds"))
+```
+
+## Raw self-report data
+
+```{r}
+dat_rep_trimmed <- all_rep_dat %>%
+  mutate(id = as.character(id)) %>%
+  left_join(start_dates, c("id" = "ID")) %>%
+  relocate(study_start_date, treatment_start_date, .after = daterated) %>%
+  filter(daterated >= study_start_date, is.na(treatment_start_date) | daterated < treatment_start_date) %>%
+  ungroup()
+
+dat_rep_trimmed
+```
+
+```{r fig.height=10}
+ggplot(dat_rep_trimmed, aes(daterated, menstrualbleeding)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~ id, scales = "free_x")
+
+ggplot(dat_rep_trimmed, aes(daterated, firstdayofperiod)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~ id, scales = "free_x")
+```
 
