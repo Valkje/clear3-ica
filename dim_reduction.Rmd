@@ -1,0 +1,1908 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+local <- TRUE
+
+wd <- ""
+
+if (!local) {
+  # Cluster environment
+  wd <- "~/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
+} else {
+  wd <- "/Volumes/home/preclineu/lorkno/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "~/HPC_project/data"
+}
+
+model_dir <- file.path(dat_dir, "complete_data_models")
+
+# For manuscript images
+man_img_dir <- file.path("~/Documents/Writing/Papers/Paper 1/images")
+
+# For some reason this sets the pwd only for the current scope, which means it 
+# does not affect anything outside an if block if you set it there.
+# So that's why it's here instead of above.
+setwd(wd) 
+
+source("src/load_dependencies.R")
+library(fastICA)
+
+# Because it's required by the Lancet
+options(OutDec = "·")
+```
+
+```{r}
+load(file.path(dat_dir, "dat_reg_tdia_30_blocked.rda"))
+load(file.path(dat_dir, "imp_multi_tdia_30_blocked.rda"))
+```
+
+# PCA
+
+```{r}
+test_dat <- mice::complete(imp_multi, 1) %>%
+  group_by(subject) %>%
+  select(!c(NSSIyn, mhpYN_0)) %>% # mhpYN_0 is redundant given mhpYN_1 and mhpYN_2, NSSIyn doesn't play nice with our regressions
+  summarize(across(everything(), mean))
+  # summarize(across(menstrualbleeding:n_stressors, mean))
+
+test_dat
+```
+
+```{r fig.height=10}
+grid_side <- ceiling(sqrt(ncol(test_dat) - 1))
+par(mfrow = c(grid_side, grid_side))
+
+col_names <- colnames(test_dat)
+
+for (i in 2:ncol(test_dat)) {
+  hist(test_dat[[i]], main = col_names[i])
+}
+```
+
+Log-transforming some of the variables. Before we can do so, we have to add the means back (otherwise we might take the log of 0).
+
+```{r fig.height=10}
+load(file.path(dat_dir, "dat_reg_scales_tdia_30_blocked.rda"))
+
+test_dat_unscaled <- test_dat %>%
+  mutate(across(medianIKD:n_stressors, function(column) {
+    if (cur_column() %in% names(centers)) {
+      return(scales[cur_column()] * column + centers[cur_column()])
+    }
+    
+    column
+  }))
+
+par(mfrow = c(grid_side, grid_side))
+for (i in 2:ncol(test_dat_unscaled)) {
+  hist(test_dat_unscaled[[i]], main = col_names[i])
+}
+
+test_dat_log <- test_dat_unscaled %>%
+  mutate(across(c(
+    menstrualbleeding,
+    firstdayofperiod,
+    physicalpain,
+    physicaltension,
+    wantedNSSI,
+    DRSPx_panicked,
+    DRSPx_afraid,
+    DRSPx_notenjoy,
+    DRSPx_unmotivated,
+    DRSP10_diffconc,
+    DRSP12_appoverate,
+    DRSP17_outofcontrol,
+    DRSP18_breasttender,
+    DRSP19_swellbloat,
+    DRSP20_headache,
+    perceivedburden,
+    forgetful,
+    distractable,
+    troubleadjust,
+    starts_with("eat"),
+    mhpYN_1,
+    mhpYN_2,
+    usedPRN:panicattack,
+    rumination:n_stressors
+  ), ~ log(.x + 5)))
+
+par(mfrow = c(grid_side, grid_side))
+for (i in 2:ncol(test_dat)) {
+  hist(test_dat_log[[i]], main = col_names[i])
+}
+```
+
+Also after rescaling back to the original scale, many measures still contain zeros. If we want to take the log without generating `NA`s, we would need to add an offset, but it is unclear what a good offset would be (e.g. a very small offset would just skew the distribution even more). All in all, let's not use the log-transformed measures right now and continue with the already scaled data.
+
+```{r}
+pca_res <- prcomp(test_dat[,2:ncol(test_dat)])
+pca_res
+```
+
+```{r fig.height=8}
+fviz_screeplot(pca_res)
+fviz_contrib(pca_res, choice = "var", axes = 1, top = 20)
+fviz_contrib(pca_res, choice = "var", axes = 2, top = 10)
+fviz_contrib(pca_res, choice = "var", axes = 3, top = 10)
+fviz_pca_var(pca_res, col.var = "contrib")
+fviz_pca_biplot(pca_res)
+```
+
+# Exploratory factor analysis
+
+```{r}
+fa_dat <- test_dat %>%
+  select(!c(subject:mean_accuracy))
+```
+
+
+```{r fig.height=6}
+fa.parallel(fa_dat)
+```
+
+```{r}
+efa_res <- fa(fa_dat, 
+              # nfactors = 5, scores = "tenBerge", n.iter = 100, n.rotations = 5)
+              nfactors = 4, scores = "tenBerge", n.iter = 100, rotate = "none")
+```
+
+```{r paged.print=FALSE}
+efa_res
+```
+
+```{r fig.height=8}
+fa.plot(efa_res)
+```
+
+
+```{r fig.height=15, fig.width=15}
+# pdf("images/dim_reduction/fa_graph.pdf", width = 12, height = 14)
+
+fa.diagram(efa_res)
+
+# dev.off()
+```
+
+## Do rotation manually
+
+```{r}
+efa_res_cp <- efa_res
+
+rot <- GPFoblq(efa_res_cp$loadings, method = "oblimin")
+
+# Get matrix that rotates unrotated vectors to the configuration found by
+# GPFoblq. Note that rotated_loadings %*% t(Th) == original_loadings, so
+# rotated_loadings == original_loadings %*% t(Th)^-1. We can find t(Th)^-1 by
+# solving t(Th) %*% t(Th)^-1 = I
+rot_mat = solve(t(rot$Th), diag(ncol(rot$Th)))
+
+rot_loadings <- efa_res_cp$loadings %*% rot_mat
+dimnames(rot_loadings) <- dimnames(efa_res_cp$loadings)
+all.equal(rot_loadings, rot$loadings)
+```
+
+
+```{r fig.height=15, fig.width=15}
+efa_res_cp$loadings <- rot_loadings
+efa_res_cp$Structure <- rot_loadings %*% rot$Phi
+fa.diagram(efa_res_cp)
+```
+
+## Recompute factor scores
+
+```{r}
+factor.scores(test_dat %>%
+                select(!subject),
+              efa_res_cp$loadings, rot$Phi, method = "tenBerge")
+```
+
+# Multiple factor analysis
+
+Do initial factor analysis to get factor rotation and correlation matrices.
+
+```{r}
+init_dat <- mice::complete(imp_multi, 1) %>%
+  group_by(subject) %>%
+  select(!NSSIyn) %>%
+  summarize(across(everything(), mean)) %>%
+  select(!subject:mean_accuracy)
+
+init_efa <- fa(init_dat, nfactors = 6, scores = "tenBerge", n.iter = 100, 
+               rotate = "none", fm = "ml")
+
+rot <- GPFoblq(init_efa$loadings, method = "oblimin")
+
+# Get matrix that rotates unrotated vectors to the configuration found by
+# GPFoblq. Note that rotated_loadings %*% t(Th) == original_loadings, so
+# rotated_loadings == original_loadings %*% t(Th)^-1. We can find t(Th)^-1 by
+# solving t(Th) %*% t(Th)^-1 = I
+rot_mat = solve(t(rot$Th), diag(ncol(rot$Th)))
+```
+
+Run a factor analysis for every imputed data set, rotate the factors, and calculate the factor scores.
+
+```{r}
+fa_multi <- mice::complete(imp_multi, "long") %>%
+  group_by(.imp, subject) %>%
+  select(!c(NSSIyn, .id)) %>%
+  summarize(across(everything(), mean)) %>%
+  select(!subject:mean_accuracy) %>%
+  nest() %>% # Still grouped by .imp
+  mutate(
+    efa = list(fa(data[[1]], nfactors = 6, scores = "tenBerge", rotate = "none", fm = "ml")),
+    rot_loadings = list({
+      m <- efa[[1]]$loadings %*% rot_mat
+      dimnames(m) <- dimnames(efa[[1]]$loadings)
+      m
+    }),
+    fs = list(
+      factor.scores(data[[1]], rot_loadings[[1]], rot$Phi, method = "tenBerge")
+    )
+  )
+
+fa_multi
+```
+
+```{r fig.height=15}
+for (i in 1:nrow(fa_multi)) {
+  efa <- fa_multi[i,]$efa[[1]]
+  efa$loadings <- fa_multi[i,]$rot_loadings[[1]]
+  efa$Structure <- efa$loadings %*% rot$Phi
+  fa.diagram(efa)
+}
+```
+
+```{r fig.height=8, warning=FALSE}
+for (i in 1:nrow(fa_multi)) {
+  loadings <- fa_multi[i,]$rot_loadings[[1]]
+  m_loadings <- melt(loadings, varnames = c("Variable", "Factor"))
+  
+  g <- ggplot(m_loadings, aes(abs(value), Variable, fill = value)) +
+    geom_col() +
+    facet_wrap(~ Factor, nrow = 1) +
+    scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                         name = "Loading") +
+    xlab("Loading")
+  
+  print(g)
+}
+```
+
+## Varimax
+
+Run the factor analyses with varimax rotation, hope the different analyses end up with similar rotations.
+
+```{r}
+fa_multi_v <- mice::complete(imp_multi, "long") %>%
+  group_by(.imp, subject) %>%
+  select(!c(NSSIyn, mhpYN_0, .id)) %>% # mhpYN_0 is redundant given mhpYN_1 and mhpYN_2
+  summarize(across(everything(), mean)) %>%
+  select(!subject:mean_accuracy) %>%
+  nest() %>% # Still grouped by .imp
+  mutate(
+    efa = list(fa(data[[1]], nfactors = 4, scores = "regression", rotate = "varimax", fm = "ml"))
+  )
+
+fa_multi_v
+```
+
+
+```{r fig.height=15, fig.width=15}
+for (efa in fa_multi_v$efa) {
+  fa.diagram(efa)
+}
+```
+
+```{r fig.height=8, warning=FALSE}
+for (i in 1:nrow(fa_multi_v)) {
+  loadings <- fa_multi_v[i,]$efa[[1]]$loadings[]
+  m_loadings <- melt(loadings, varnames = c("Variable", "Factor"))
+  
+  g <- ggplot(m_loadings, aes(abs(value), Variable, fill = value)) +
+    geom_col() +
+    facet_wrap(~ Factor, nrow = 1) +
+    scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                         name = "Loading") +
+    xlab("Loading")
+  
+  print(g)
+}
+```
+
+Try to correlate the differently ordered factors. Take the first factor analysis loadings as the template.
+
+```{r}
+loadings <- lapply(fa_multi_v$efa, function(efa) efa$loadings[])
+
+tmpl_idx <- 1
+tmpl <- loadings[[tmpl_idx]]
+
+reordered_idx <- vector("list", length(loadings))
+cor_signs <- vector("list", length(loadings))
+
+for (i in 1:length(loadings)) {
+  ls <- loadings[[i]]
+  cors <- cor(tmpl, ls)
+  
+  idxs <- vector("integer", nrow(cors))
+  signs <- vector("integer", nrow(cors))
+  
+  for (j in 1:nrow(cors)) {
+    idxs[j] <- which.max(abs(cors[j,]))
+    signs[j] <- sign(cors[j, idxs[j]])
+    
+    # Factors in ls that have already been matched cannot be matched again
+    cors[,idxs[j]] <- 0 
+  }
+  
+  reordered_idx[[i]] <- idxs
+  cor_signs[[i]] <- signs
+  
+  # g <- ggplot(melt(cor(tmpl, ls)), aes(X2, X1, fill = abs(value))) +
+  #   geom_raster() +
+  #   scale_fill_gradient2(low = muted("white"), high = muted("red")) +
+  #   scale_y_discrete(limits = rev)
+  # 
+  # print(g)
+  # 
+  # break
+}
+
+reordered_loadings <- map2(loadings, reordered_idx, function(l, idxs) l[,idxs])
+resigned_loadings <- map2(reordered_loadings, cor_signs, function(l, s) {
+  t(t(l) * s)
+})
+```
+
+```{r fig.height=8, warning=FALSE}
+for (loadings in resigned_loadings) {
+  m_loadings <- melt(loadings, varnames = c("Variable", "Factor"))
+  
+  g <- ggplot(m_loadings, aes(abs(value), Variable, fill = value)) +
+    geom_col() +
+    facet_wrap(~ Factor, nrow = 1) +
+    scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                         name = "Loading") +
+    xlab("Loading")
+  
+  print(g)
+}
+```
+
+```{r}
+r_l_dats <- lapply(resigned_loadings, function(l) {
+  colnames(l) <- NULL
+  data.frame(l) %>%
+    rownames_to_column("variable")
+})
+
+names(r_l_dats) <- 1:length(r_l_dats)
+loading_dat <- bind_rows(r_l_dats, .id = ".imp") %>%
+  pivot_longer(starts_with("X"), "factor", values_to = "loading") %>%
+  group_by(variable, factor) %>%
+  summarize(
+    mean = mean(loading),
+    sd = sd(loading)
+  )
+  
+loading_dat
+```
+
+```{r fig.height=8}
+ggplot(loading_dat, aes(y = variable)) +
+  geom_col(aes(mean, fill = mean)) +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  geom_errorbar(aes(xmin = mean - sd, xmax = mean + sd), width = 0.2) +
+  facet_wrap(~ factor, nrow = 1) +
+  xlab("Mean loading (± SD)") +
+  ylab("Variable")
+```
+
+```{r}
+fa_multi_v$scores <- map2(fa_multi_v$efa, reordered_idx, function(e, idx) e$scores[,idx])
+fa_multi_v$scores <- map2(fa_multi_v$scores, cor_signs, function(sc, si) {
+  df <- data.frame(t(t(sc) * si))
+  colnames(df) <- paste0("X", 1:ncol(df))
+  df
+})
+fa_multi_v
+```
+
+
+## Model and pool
+
+```{r}
+biaffect_multi <- mice::complete(imp_multi, "long") %>%
+  group_by(.imp, subject) %>%
+  summarize(across(medianIKD:mean_accuracy, mean)) %>%
+  ungroup()
+
+biaffect_multi
+```
+
+
+```{r}
+fa_models_multi <- fa_multi_v %>%
+  select(.imp, scores) %>%
+  unnest(scores) %>%
+  cbind(biaffect_multi %>%
+          select(!c(.imp, subject))) %>%
+  summarize(
+    across(starts_with("X"), ~ list(lm(.x ~ mean_accuracy +
+                                         medianIKD +
+                                         percent95IKD +
+                                         madIKD +
+                                         autocorrectRate +
+                                         backspaceRate +
+                                         totalKeyPresses +
+                                         active +
+                                         upright +
+                                         bed))))
+
+fa_models_multi
+```
+
+```{r}
+fa_pools_multi <- fa_models_multi %>%
+  summarize(across(starts_with("X"), ~ list(pool(.x))))
+
+fa_pools_multi
+```
+
+```{r}
+i <- 0
+for (x in fa_pools_multi) {
+  print(i <- i + 1)
+  print(x[[1]])
+  cat("\n")
+  print(summary(x[[1]]))
+  cat("\n------------------------------------------------------\n\n")
+}
+```
+
+# Multiple bifactor analysis
+
+## Test run on first imputed data set
+
+```{r fig.height=15}
+fa_dat <- test_dat %>%
+  select(!c(subject:mean_accuracy))
+bi_res <- omega(fa_dat, nfactors = 4, fm = "ml", flip = FALSE)
+```
+
+```{r fig.height=8}
+m_loadings <- melt(bi_res$schmid$sl[,1:5], varnames = c("Variable", "Factor"))
+  
+ggplot(m_loadings, aes(abs(value), Variable, fill = value)) +
+  geom_col() +
+  facet_wrap(~ Factor, nrow = 1) +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  xlab("Loading")
+```
+
+```{r}
+bi_scores <- factor.scores(fa_dat, bi_res$schmid$sl[,1:5])$scores
+bi_scores
+```
+
+```{r}
+bi_scores_biaffect <- test_dat %>%
+  select(medianIKD:mean_accuracy) %>%
+  cbind(bi_scores)
+
+bi_scores_biaffect
+```
+
+```{r}
+m1 <- lm(g ~ mean_accuracy +
+           medianIKD +
+           percent95IKD +
+           madIKD +
+           autocorrectRate +
+           backspaceRate +
+           totalKeyPresses +
+           active +
+           upright +
+           bed,
+         data = bi_scores_biaffect)
+
+summary(m1)
+```
+
+## All data sets
+
+```{r fig.height=15}
+bi_multi <- mice::complete(imp_multi, "long") %>%
+  group_by(.imp, subject) %>%
+  select(!c(NSSIyn, mhpYN_0, .id)) %>% # mhpYN_0 is redundant given mhpYN_1 and mhpYN_2
+  summarize(across(everything(), mean)) %>%
+  select(!subject:mean_accuracy) %>%
+  nest() %>% # Still grouped by .imp
+  mutate(
+    bi = list(omega(data[[1]], nfactors = 4, fm = "ml", flip = FALSE))
+  )
+
+bi_multi
+```
+
+```{r fig.height=8, warning=FALSE}
+for (i in 1:nrow(bi_multi)) {
+  loadings <- bi_multi[i,]$bi[[1]]$schmid$sl[,1:5]
+  m_loadings <- melt(loadings, varnames = c("Variable", "Factor"))
+  
+  g <- ggplot(m_loadings, aes(abs(value), Variable, fill = value)) +
+    geom_col() +
+    facet_wrap(~ Factor, nrow = 1) +
+    scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                         name = "Loading") +
+    xlab("Loading")
+  
+  print(g)
+}
+```
+
+```{r}
+bi_loadings <- lapply(bi_multi$bi, function(bi) {
+  data.frame(bi$schmid$sl[,1:5]) %>%
+    rownames_to_column("variable")
+})
+
+loading_dat <- bind_rows(bi_loadings, .id = ".imp") %>%
+  pivot_longer(c(g, starts_with("F")), "factor", values_to = "loading") %>%
+  group_by(variable, factor) %>%
+  summarize(
+    mean = mean(loading),
+    sd = sd(loading)
+  )
+  
+loading_dat
+```
+
+```{r fig.height=8}
+ggplot(loading_dat, aes(y = variable)) +
+  geom_col(aes(mean, fill = mean)) +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  geom_errorbar(aes(xmin = mean - sd, xmax = mean + sd), width = 0.2) +
+  facet_wrap(~ factor, nrow = 1) +
+  xlab("Mean loading (± SD)") +
+  ylab("Variable")
+```
+
+```{r}
+loadings <- lapply(bi_multi$bi, function(bi) bi$schmid$sl[,1:5])
+
+tmpl_idx <- 1
+tmpl <- loadings[[tmpl_idx]]
+
+reordered_idx <- vector("list", length(loadings))
+cor_signs <- vector("list", length(loadings))
+
+for (i in 1:length(loadings)) {
+  ls <- loadings[[i]]
+  cors <- cor(tmpl, ls)
+  
+  idxs <- vector("integer", nrow(cors))
+  signs <- vector("integer", nrow(cors))
+  
+  for (j in 1:nrow(cors)) {
+    idxs[j] <- which.max(abs(cors[j,]))
+    signs[j] <- sign(cors[j, idxs[j]])
+    
+    # Factors in ls that have already been matched cannot be matched again
+    cors[,idxs[j]] <- 0 
+  }
+  
+  reordered_idx[[i]] <- idxs
+  cor_signs[[i]] <- signs
+  
+  # g <- ggplot(melt(cor(tmpl, ls)), aes(X2, X1, fill = abs(value))) +
+  #   geom_raster() +
+  #   scale_fill_gradient2(low = muted("white"), high = muted("red")) +
+  #   scale_y_discrete(limits = rev)
+  # 
+  # print(g)
+  # 
+  # break
+}
+
+reordered_loadings <- map2(loadings, reordered_idx, function(l, idxs) l[,idxs])
+resigned_loadings <- map2(reordered_loadings, cor_signs, function(l, s) {
+  t(t(l) * s)
+})
+```
+
+```{r fig.height=8}
+bi_r_l_dats <- lapply(resigned_loadings, function(l) {
+  colnames(l) <- c("g", "F1", "F2", "F3", "F4")
+  data.frame(l) %>%
+    rownames_to_column("variable")
+})
+
+names(bi_r_l_dats) <- 1:length(bi_r_l_dats)
+resigned_loading_dat <- bind_rows(bi_r_l_dats, .id = ".imp") %>%
+  pivot_longer(c(g, starts_with("F")), "factor", values_to = "loading") %>%
+  group_by(variable, factor) %>%
+  summarize(
+    mean = mean(loading),
+    sd = sd(loading)
+  )
+
+ggplot(resigned_loading_dat, aes(y = variable)) +
+  geom_col(aes(mean, fill = mean)) +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  geom_errorbar(aes(xmin = mean - sd, xmax = mean + sd), width = 0.2) +
+  facet_wrap(~ factor, nrow = 1) +
+  xlab("Mean loading (± SD)") +
+  ylab("Variable")
+```
+
+
+```{r}
+bi_multi_scores <- bi_multi %>%
+  rowwise() %>%
+  mutate(
+    scores = list(data.frame(factor.scores(data, bi$schmid$sl[,1:5])$scores))
+  ) %>% 
+  ungroup()
+
+bi_multi_scores
+```
+
+```{r}
+mean_gs <- bi_multi_scores %>%
+  select(.imp, scores) %>%
+  unnest(scores) %>%
+  mutate(subject = as.factor(rep(1:nrow(fa_dat), times = max(.imp)))) %>%
+  group_by(subject) %>%
+  summarize(mean_g = mean(g), sd_g = sd(g))
+
+mean_gs
+```
+
+
+```{r fig.height=10}
+ggplot(mean_gs, aes(x = subject, y = mean_g)) +
+  geom_col(color = "white", fill = "steelblue") +
+  geom_errorbar(aes(ymin = mean_g - sd_g, ymax = mean_g + sd_g), width = 0.2)
+```
+
+```{r}
+biaffect_multi <- mice::complete(imp_multi, "long") %>%
+  group_by(.imp, subject) %>%
+  summarize(across(medianIKD:mean_accuracy, mean)) %>%
+  ungroup()
+
+biaffect_multi
+```
+
+```{r}
+# Note for next time: First pivot to long format, then it is easy to calculate
+# mean and sd in one go
+biaffect_means <- biaffect_multi %>%
+  select(!.imp) %>%
+  group_by(subject) %>%
+  summarize(across(everything(), mean)) %>%
+  pivot_longer(medianIKD:mean_accuracy, values_to = "mean")
+
+biaffect_means_sds <- biaffect_multi %>%
+  select(!.imp) %>%
+  group_by(subject) %>%
+  summarize(across(everything(), sd)) %>%
+  pivot_longer(medianIKD:mean_accuracy, values_to = "sd") %>%
+  ungroup() %>%
+  mutate(
+    subject = as.factor(subject), 
+    name = as.factor(name), 
+    mean = biaffect_means$mean
+  )
+
+biaffect_means_sds
+```
+
+```{r}
+range(biaffect_means_sds$mean)
+```
+
+```{r fig.height=15}
+ggplot(biaffect_means_sds, aes(subject, mean)) +
+  geom_col(fill = "steelblue") +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), width = 0.2) +
+  facet_wrap(~ name) +
+  ylab("Mean across imputations (± SD)") +
+  theme(text = element_text(size = 18),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 10))
+```
+
+
+```{r}
+bi_multi_models <- bi_multi_scores %>%
+  select(.imp, scores) %>%
+  unnest(scores) %>%
+  cbind(biaffect_multi %>%
+          select(!c(.imp, subject))) %>%
+  group_by(.imp) %>%
+  summarize(
+    across(c(g, starts_with("F")), ~ list(lm(.x ~ mean_accuracy +
+                                               medianIKD +
+                                               percent95IKD +
+                                               madIKD +
+                                               autocorrectRate +
+                                               backspaceRate +
+                                               totalKeyPresses +
+                                               active +
+                                               upright +
+                                               bed))))
+
+bi_multi_models
+```
+
+```{r}
+lapply(bi_multi_models$g, summary)
+```
+
+
+```{r}
+pooled_g <- pool(bi_multi_models$g)
+pooled_g
+```
+
+```{r}
+summary(pooled_g)
+```
+
+## With more stable imputations
+
+```{r}
+imp_multi_cln <- readRDS(file.path(dat_dir, "imp_multi_cln_tdia_30_blocked.rds"))
+```
+
+```{r fig.height=15}
+bi_multi <- mice::complete(imp_multi_cln, "long") %>%
+  group_by(.imp, subject) %>%
+  select(!c(NSSIyn, .id)) %>%
+  # select(!c(NSSIyn, mhpYN_0, .id)) %>% # mhpYN_0 is redundant given mhpYN_1 and mhpYN_2
+  summarize(across(everything(), mean)) %>%
+  select(!subject:mean_accuracy) %>%
+  nest() %>% # Still grouped by .imp
+  mutate(
+    bi = list(omega(data[[1]], nfactors = 4, fm = "ml", flip = FALSE))
+  )
+
+bi_multi
+```
+
+```{r fig.height=8, warning=FALSE}
+for (i in 1:nrow(bi_multi)) {
+  loadings <- bi_multi[i,]$bi[[1]]$schmid$sl[,1:5]
+  m_loadings <- melt(loadings, varnames = c("Variable", "Factor"))
+  
+  g <- ggplot(m_loadings, aes(abs(value), Variable, fill = value)) +
+    geom_col() +
+    facet_wrap(~ Factor, nrow = 1) +
+    scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                         name = "Loading") +
+    xlab("Loading")
+  
+  print(g)
+}
+```
+
+```{r}
+loadings <- lapply(bi_multi$bi, function(bi) bi$schmid$sl[,1:5])
+
+tmpl_idx <- 1
+tmpl <- loadings[[tmpl_idx]]
+
+reordered_idx <- vector("list", length(loadings))
+cor_signs <- vector("list", length(loadings))
+
+for (i in 1:length(loadings)) {
+  ls <- loadings[[i]]
+  cors <- cor(tmpl, ls)
+  
+  idxs <- vector("integer", nrow(cors))
+  signs <- vector("integer", nrow(cors))
+  
+  for (j in 1:nrow(cors)) {
+    idxs[j] <- which.max(abs(cors[j,]))
+    signs[j] <- sign(cors[j, idxs[j]])
+    
+    # Factors in ls that have already been matched cannot be matched again
+    cors[,idxs[j]] <- 0 
+  }
+  
+  reordered_idx[[i]] <- idxs
+  cor_signs[[i]] <- signs
+  
+  # g <- ggplot(melt(cor(tmpl, ls)), aes(X2, X1, fill = abs(value))) +
+  #   geom_raster() +
+  #   scale_fill_gradient2(low = muted("white"), high = muted("red")) +
+  #   scale_y_discrete(limits = rev)
+  # 
+  # print(g)
+  # 
+  # break
+}
+
+reordered_loadings <- map2(loadings, reordered_idx, function(l, idxs) l[,idxs])
+resigned_loadings <- map2(reordered_loadings, cor_signs, function(l, s) {
+  t(t(l) * s)
+})
+```
+
+```{r fig.height=8, warning=FALSE}
+for (loadings in resigned_loadings) {
+  m_loadings <- melt(loadings, varnames = c("Variable", "Factor"))
+  
+  g <- ggplot(m_loadings, aes(abs(value), Variable, fill = value)) +
+    geom_col() +
+    facet_wrap(~ Factor, nrow = 1) +
+    scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                         name = "Loading") +
+    xlab("Loading")
+  
+  print(g)
+}
+```
+
+```{r}
+bi_loadings <- lapply(bi_multi$bi, function(bi) {
+  data.frame(bi$schmid$sl[,1:5]) %>%
+    rownames_to_column("variable")
+})
+
+loading_dat <- bind_rows(bi_loadings, .id = ".imp") %>%
+  pivot_longer(c(g, starts_with("F")), "factor", values_to = "loading") %>%
+  group_by(variable, factor) %>%
+  summarize(
+    mean = mean(loading),
+    sd = sd(loading)
+  )
+  
+loading_dat
+```
+
+```{r fig.height=8}
+ggplot(loading_dat, aes(y = variable)) +
+  geom_col(aes(mean, fill = mean)) +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  geom_errorbar(aes(xmin = mean - sd, xmax = mean + sd), width = 0.2) +
+  facet_wrap(~ factor, nrow = 1) +
+  xlab("Mean loading (± SD)") +
+  ylab("Variable")
+```
+
+```{r}
+bi_r_l_dats <- lapply(resigned_loadings, function(l) {
+  colnames(l) <- c("g", "F1", "F2", "F3", "F4")
+  data.frame(l) %>%
+    rownames_to_column("variable")
+})
+
+names(bi_r_l_dats) <- 1:length(bi_r_l_dats)
+resigned_loading_dat <- bind_rows(bi_r_l_dats, .id = ".imp") %>%
+  pivot_longer(c(g, starts_with("F")), "factor", values_to = "loading") %>%
+  group_by(variable, factor) %>%
+  summarize(
+    mean = mean(loading),
+    sd = sd(loading)
+  )
+  
+resigned_loading_dat
+```
+
+```{r fig.height=8}
+ggplot(resigned_loading_dat, aes(y = variable)) +
+  geom_col(aes(mean, fill = mean)) +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  geom_errorbar(aes(xmin = mean - sd, xmax = mean + sd), width = 0.2) +
+  facet_wrap(~ factor, nrow = 1) +
+  xlab("Mean loading (± SD)") +
+  ylab("Variable")
+```
+
+```{r}
+bi_multi_scores <- bi_multi %>%
+  rowwise() %>%
+  mutate(
+    scores = list(data.frame(factor.scores(data, bi$schmid$sl[,1:5])$scores))
+  ) %>% 
+  ungroup()
+
+bi_multi_scores
+```
+
+```{r}
+bi_multi_r_scores <- bi_multi_scores
+
+bi_multi_r_scores$r_scores <- map2(bi_multi_r_scores$scores, reordered_idx, function(sc, idx) {
+  sc[,idx]
+})
+bi_multi_r_scores$r_scores <- map2(bi_multi_r_scores$r_scores, cor_signs, function(sc, si) {
+  df <- data.frame(t(t(sc) * si))
+  colnames(df) <- c("g", paste0("F", 1:(ncol(df)-1)))
+  df
+})
+bi_multi_r_scores
+```
+
+
+```{r}
+biaffect_multi <- mice::complete(imp_multi_cln, "long") %>%
+  group_by(.imp, subject) %>%
+  summarize(across(medianIKD:mean_accuracy, mean)) %>%
+  ungroup()
+
+biaffect_multi
+```
+
+```{r}
+bi_multi_models <- bi_multi_scores %>%
+  select(.imp, scores) %>%
+  unnest(scores) %>%
+  cbind(biaffect_multi %>%
+          select(!c(.imp, subject))) %>%
+  group_by(.imp) %>%
+  summarize(
+    across(c(g, starts_with("F")), ~ list(lm(.x ~ mean_accuracy +
+                                               medianIKD +
+                                               percent95IKD +
+                                               madIKD +
+                                               autocorrectRate +
+                                               backspaceRate +
+                                               totalKeyPresses +
+                                               active +
+                                               upright +
+                                               bed))))
+
+bi_multi_models
+```
+
+```{r}
+lapply(bi_multi_models$g, summary)
+```
+
+
+```{r}
+pooled_g <- pool(bi_multi_models$g)
+pooled_g
+```
+
+```{r}
+summary(pooled_g)
+```
+
+```{r}
+pooled <- bi_multi_models %>%
+  summarize(across(g:F4., ~ list(pool(.x))))
+
+pooled
+```
+
+```{r}
+for (i in 1:ncol(pooled)) {
+  print(colnames(pooled)[i])
+  print(summary(pooled[[i]][[1]]))
+}
+```
+
+```{r}
+bi_multi_r_models <- bi_multi_r_scores %>%
+  select(.imp, r_scores) %>%
+  unnest(r_scores) %>%
+  cbind(biaffect_multi %>%
+          select(!c(.imp, subject))) %>%
+  group_by(.imp) %>%
+  summarize(
+    across(c(g, starts_with("F")), ~ list(lm(.x ~ mean_accuracy +
+                                               medianIKD +
+                                               percent95IKD +
+                                               madIKD +
+                                               autocorrectRate +
+                                               backspaceRate +
+                                               totalKeyPresses +
+                                               active +
+                                               upright +
+                                               bed))))
+
+bi_multi_r_models
+```
+
+```{r}
+pooled_r <- bi_multi_r_models %>%
+  summarize(across(g:F4, ~ list(pool(.x))))
+
+pooled_r
+```
+
+```{r}
+for (i in 1:ncol(pooled_r)) {
+  print(colnames(pooled_r)[i])
+  print(summary(pooled_r[[i]][[1]]))
+}
+```
+
+Inspect the (resigned) factor scores for all subjects, mainly to check whether they're different from zero.
+
+```{r fig.height=15}
+subs <- factor(unique(biaffect_multi$subject))
+df <- bi_multi_scores %>%
+  select(.imp, r_scores) %>%
+  unnest(r_scores) %>%
+  mutate(subject = rep(subs, times = max(.imp))) %>%
+  pivot_longer(g:F4, "factor", values_to = "loading") %>%
+  group_by(subject, factor) %>%
+  summarize(
+    mean = mean(loading),
+    sd = sd(loading)
+  )
+
+ggplot(df, aes(subject, mean)) +
+  geom_col(aes(fill = mean)) +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), width = 0.2) +
+  facet_wrap(~ factor, nrow = 2) +
+  xlab("Subject") +
+  ylab("Mean loading (± SD)") +
+  theme(axis.text.x=element_text(angle = -90, hjust = 0))
+```
+
+## Disregarding the repeated measures structure
+
+```{r}
+load(file.path(dat_dir, "imp_merged_tdia_30_blocked.rda"))
+```
+
+```{r fig.height=15}
+bi_merged <- mice::complete(imp_merged, "long") %>%
+  group_by(.imp, subject) %>%
+  select(!c(NSSIyn, mhpYN_0, .id)) %>% # mhpYN_0 is redundant given mhpYN_1 and mhpYN_2
+  summarize(across(everything(), mean)) %>%
+  select(!subject:mean_accuracy) %>%
+  nest() %>% # Still grouped by .imp
+  mutate(
+    bi = list(omega(data[[1]], nfactors = 4, fm = "ml", flip = FALSE, plot = FALSE))
+  )
+```
+
+```{r fig.height=8, warning=FALSE}
+for (i in 1:nrow(bi_merged)) {
+  loadings <- bi_merged[i,]$bi[[1]]$schmid$sl[,1:5]
+  m_loadings <- melt(loadings, varnames = c("Variable", "Factor"))
+  
+  g <- ggplot(m_loadings, aes(abs(value), Variable, fill = value)) +
+    geom_col() +
+    facet_wrap(~ Factor, nrow = 1) +
+    scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                         name = "Loading") +
+    xlab("Loading")
+  
+  print(g)
+}
+```
+
+```{r}
+bi_loadings <- lapply(bi_merged$bi, function(bi) {
+  data.frame(bi$schmid$sl[,1:5]) %>%
+    rownames_to_column("variable")
+})
+
+loading_dat <- bind_rows(bi_loadings, .id = ".imp") %>%
+  pivot_longer(c(g, starts_with("F")), "factor", values_to = "loading") %>%
+  group_by(variable, factor) %>%
+  summarize(
+    mean = mean(loading),
+    sd = sd(loading)
+  )
+```
+
+```{r fig.height=8}
+ggplot(loading_dat, aes(y = variable)) +
+  geom_col(aes(mean, fill = mean)) +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  geom_errorbar(aes(xmin = mean - sd, xmax = mean + sd), width = 0.2) +
+  facet_wrap(~ factor, nrow = 1) +
+  xlab("Mean loading (± SD)") +
+  ylab("Variable")
+```
+
+```{r}
+bi_merged_scores <- bi_merged %>%
+  rowwise() %>%
+  mutate(
+    scores = list(data.frame(factor.scores(data, bi$schmid$sl[,1:5])$scores))
+  ) %>% 
+  ungroup()
+
+bi_merged_scores
+```
+
+```{r}
+biaffect_merged <- mice::complete(imp_merged, "long") %>%
+  group_by(.imp, subject) %>%
+  summarize(across(medianIKD:mean_accuracy, mean)) %>%
+  ungroup()
+```
+
+```{r}
+bi_merged_models <- bi_merged_scores %>%
+  select(.imp, scores) %>%
+  unnest(scores) %>%
+  cbind(biaffect_merged %>%
+          select(!c(.imp, subject))) %>%
+  group_by(.imp) %>%
+  summarize(
+    across(c(g, starts_with("F")), ~ list(lm(.x ~ mean_accuracy +
+                                               medianIKD +
+                                               percent95IKD +
+                                               madIKD +
+                                               autocorrectRate +
+                                               backspaceRate +
+                                               totalKeyPresses +
+                                               active +
+                                               upright +
+                                               bed))))
+```
+
+```{r}
+lapply(bi_merged_models$g, summary)
+```
+
+
+```{r}
+pooled_g <- pool(bi_merged_models$g)
+pooled_g
+```
+
+```{r}
+summary(pooled_g)
+```
+
+
+# Factor analysis with pooling
+
+```{r}
+# Aggregated data
+agg_dat <- mice::complete(imp_multi, "long") %>%
+  group_by(.imp, subject) %>%
+  select(!c(NSSIyn, .id)) %>%
+  summarize(across(everything(), mean))
+
+agg_dat
+```
+
+```{r}
+nest_dat <- agg_dat %>%
+  select(!subject:mean_accuracy) %>%
+  nest() # Still grouped by .imp
+
+nest_dat
+```
+
+```{r paged.print=FALSE}
+fa_pooled <- fa.pooled(nest_dat$data, nfactors = 6, rotate = "varimax", scores = "tenBerge", fm = "ml")
+fa_pooled
+```
+
+```{r fig.height=8}
+fa.plot(fa_pooled)
+```
+
+```{r fig.height=15, fig.width=15}
+fa.diagram(fa_pooled)
+```
+
+# ICA
+
+Here we drop the multiple imputation paradigm.
+
+```{r}
+library(fastICA)
+library(umap)
+```
+
+We will order the data into a $q$ x $t$ matrix, where $q$ corresponds to the number of questionnaire (self-report) items, and $t = \sum^N_{i = 1} t_i$ is the total number of time points we get from concatenating the data of length $t_i$ from all subjects $i = 1, ..., N$.
+
+First, we should transform the data frame selected from our Shiny application to the appropriate matrix form.
+
+```{r}
+# Semi-contiguous data
+dat_reg_contig <- readRDS(file.path(dat_dir, "dat_reg_semi_contiguous.rds"))
+dat_reg_contig
+```
+
+Write to CSV for easier interfacing with Python:
+
+```{r}
+write.csv(dat_reg_contig, file.path(dat_dir, "dat_reg_semi_contiguous.csv"),
+          row.names = FALSE)
+```
+
+Remove all BiAffect rows. Also throw out study_start_date and treatment_start_date, we don't need them here. We don't want the model to predict negative values after reconstruction, so we apply a log (+1) transform on our raw values. This allows us to take the exponent of anything the component matrix reconstructs, which gives us strictly positive values.
+
+```{r}
+dat_reg_con_sr <- dat_reg_contig %>%
+  filter(modality == "self_report", !is.na(value)) %>%
+  select(!c(study_start_date, treatment_start_date, modality)) %>%
+  group_by(variable) %>%
+  mutate(
+    logged = case_when(
+      min(value) == 0 ~ log(value + 1), # To prevent log(0) = NA values
+      TRUE ~ log(value)
+    ),
+    scaled = scale(value)
+  ) %>%
+  ungroup()
+
+dat_reg_con_sr
+```
+
+```{r}
+dat_reg_con_sr %>%
+  group_by(variable) %>%
+  summarize(min = min(value), max = max(value))
+```
+
+```{r fig.height=10}
+ggplot(dat_reg_con_sr) +
+  geom_histogram(aes(scaled)) +
+  facet_wrap(~ variable)
+
+ggplot(dat_reg_con_sr) +
+  geom_histogram(aes(logged)) +
+  facet_wrap(~ variable)
+```
+
+Remove the raw and scaled values, extract matrix.
+
+```{r}
+df <- dat_reg_con_sr %>%
+  select(!c(value, scaled)) %>% 
+  pivot_wider(names_from = variable, values_from = logged) %>%
+  arrange(subject, date) 
+
+subs <- df$subject
+dates <- df$date
+
+df <- df %>%
+  select(!c(subject, date))
+
+# t x q
+mat <- sapply(df, as.vector)
+
+means <- colMeans(mat)
+```
+
+```{r}
+library(R.matlab)
+
+writeMat(file.path(dat_dir, "dat_ica.mat"),
+         X = mat,
+         means = means,
+         subjects = subs)
+```
+
+
+To get stable estimates across multiple runs, specify an initial matrix $W$ once:
+
+```{r}
+# set.seed(42)
+w_init <- matrix(rnorm(ncol(mat)^2), ncol = ncol(mat))
+```
+
+```{r}
+n_comp <- 20
+ica <- fastICA(mat, n_comp, 
+               alg.typ = "deflation", method = "C", verbose = TRUE,
+               w.init = w_init[1:n_comp, 1:n_comp])
+```
+
+```{r}
+for (i in 1:ncol(ica$S)) {
+  hist(ica$S[,i])
+}
+```
+
+```{r}
+mix_df <- data.frame(ica$A) %>%
+  rename_with(function(x) colnames(mat)) %>%
+  add_column(ic = 1:nrow(ica$A), .before = 1) %>%
+  pivot_longer(!ic, names_to = "variable", values_to = "loading")
+
+mix_df
+```
+
+```{r fig.height=10, fig.width=20}
+ggplot(mix_df, aes(loading, variable, fill = loading)) +
+  geom_col() +
+  facet_wrap(~ ic, nrow = 2) +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  xlab("Loading")
+```
+
+```{r}
+source_df <- data.frame(ica$S) %>%
+  rename_with(function(x) 1:ncol(ica$S)) %>%
+  add_column(subject = subs, date = dates, .before = 1) %>%
+  pivot_longer(!c(subject, date), names_to = "ic") %>%
+  mutate(ic = as.integer(ic))
+
+source_df
+```
+
+```{r fig.height=10, fig.width=20}
+for (sub in unique(subs)) {
+  g <- ggplot(source_df %>%
+                filter(subject == sub),
+              aes(date, value)) +
+    geom_line() +
+    facet_wrap(~ ic, nrow = 2) +
+    labs(title = str_glue("Subject {sub}"))
+  
+  print(g)
+}
+```
+
+```{r fig.height=8, fig.width=20}
+kurts <- source_df %>%
+  group_by(ic) %>%
+  summarize(
+    kurtosis = round(mean((value - mean(value))^4) - 3 * var(value)^2, 2)
+  )
+
+y_max <- 2
+
+ggplot(source_df, aes(value)) +
+  geom_density() +
+  facet_wrap(~ ic, nrow = 2) +
+  geom_label(x = -6,
+             y = y_max,
+             hjust = "left",
+             vjust = "top",
+             size = 3,
+             aes(label = str_glue("Kurtosis: {kurtosis}")),
+             data = kurts) +
+  ylim(0, y_max)
+```
+
+## Comparing reconstructed and original signals
+
+```{r}
+recon <- ica$S %*% ica$A + matrix(rep(means, nrow(ica$S)), nrow = nrow(ica$S), byrow = TRUE)
+
+recon_df <- data.frame(recon) %>%
+  rename_with(function(x) colnames(mat)) %>%
+  add_column(subject = subs, date = dates, .before = 1) %>%
+  pivot_longer(!c(subject, date), 
+               names_to = "variable", values_to = "reconstructed") %>%
+  mutate(reconstructed = exp(reconstructed)) %>%
+  inner_join(dat_reg_con_sr, c("subject", "date", "variable")) %>%
+  select(!c(logged, scaled)) %>%
+  rename(original = value) %>%
+  pivot_longer(c(reconstructed, original), names_to = "phase")
+
+recon_df
+```
+
+```{r fig.height=10}
+for (sub in unique(subs)) {
+  g <- ggplot(recon_df %>%
+           filter(subject == sub), aes(date, value)) +
+    geom_line(aes(color = phase)) +
+    facet_wrap(~ variable) +
+    labs(title = str_glue("Subject {sub}"))
+  
+  print(g)
+}
+```
+
+## R2 plot
+
+```{r}
+max_ica <- fastICA(mat, ncol(mat), 
+                   alg.typ = "deflation", method = "C", verbose = FALSE,
+                   w.init = w_init)
+
+logMean_mat <- matrix(rep(means, nrow(ica$S)), nrow = nrow(ica$S), byrow = TRUE)
+SS_tot <- colSums((exp(mat) - colMeans(exp(mat)))^2)
+
+r2_list <- lapply(1:ncol(mat), function(n_comp) {
+  if (n_comp == 1) {
+    A <- matrix(max_ica$A[1,], nrow = 1) # Prevent A from getting demoted to vector
+  } else {
+    A <- max_ica$A[1:n_comp,]
+  }
+  
+  recon <- exp(max_ica$S[,1:n_comp] %*% A + logMean_mat)
+  r2 <- 1 - colSums((exp(mat) - recon)^2) / SS_tot
+  
+  data.frame(value = r2) %>%
+    rownames_to_column() %>%
+    pivot_wider(names_from = rowname)
+})
+
+r2_df <- bind_rows(r2_list, .id = "n_comp") %>%
+  pivot_longer(!n_comp, names_to = "variable", values_to = "r2") %>%
+  mutate(n_comp = as.integer(n_comp))
+
+r2_df
+```
+
+```{r fig.height=10}
+ggplot(r2_df, aes(n_comp, r2)) +
+  geom_line() +
+  facet_wrap(~ variable)
+```
+
+## Testing stability of ICA
+
+```{r}
+n_iter <- 100
+dim_x <- ncol(mat)
+dim_s <- 10
+
+icas <- replicate(
+  n_iter, 
+  fastICA(
+    mat, dim_s, 
+    alg.typ = "parallel", method = "C", verbose = FALSE
+  ),
+  simplify = FALSE
+)
+```
+
+```{r}
+s_stacked <- vapply(icas, function(ica) {
+  ica$S
+}, matrix(0, nrow = nrow(mat), ncol = dim_s))
+dim(s_stacked) <- c(nrow(mat), dim_s * n_iter)
+s_stacked <- t(s_stacked)
+```
+
+```{r}
+w_stacked <- vapply(icas, function(ica) {
+  ica$K %*% ica$W
+}, matrix(0, nrow = dim_x, ncol = dim_s))
+
+# print(w_stacked[,,1])
+
+dim(w_stacked) <- c(dim_x, dim_s * n_iter)
+w_stacked <- t(w_stacked)
+```
+
+```{r}
+mat_c <- cov(mat)
+mat_r <- w_stacked %*% mat_c %*% t(w_stacked)
+mat_d <- sqrt(1 - mat_r)
+mat_d[is.nan(mat_d)] <- 0
+sum(mat_r > 0.98)
+```
+
+```{r}
+umap.settings <- umap.defaults
+umap.settings$metric <- function(mat, origin, target) {
+  # Note that origin is an index, target is a vector of indices
+  mat_d[origin, target]
+}
+umap.settings$min_dist <- 1
+umap.settings$spread <- 1.1
+umap.settings$n_neighbors <- 50
+
+emb <- umap(s_stacked, umap.settings)
+emb
+```
+
+```{r}
+ggplot(data.frame(emb$layout), aes(X1, X2)) +
+  geom_point(alpha = 0.1)
+```
+
+Seems legit.
+
+```{r}
+umap.settings2 <- umap.settings
+umap.settings2$metric <- "euclidean"
+
+emb2 <- umap(s_stacked, umap.settings2)
+
+ggplot(data.frame(emb2$layout), aes(X1, X2)) +
+  geom_point(alpha = 0.1)
+```
+
+Export d_mat to examine the umap projections in Python.
+
+```{r}
+write.csv(mat_d, file.path(dat_dir, "mat_d.csv"), row.names = FALSE)
+```
+
+
+## Testing stability of Infomax
+
+```{r}
+library(ica)
+```
+
+```{r}
+icais <- replicate(
+  n_iter,
+  icaimax(mat, dim_s, maxit = 500),
+  simplify = FALSE
+)
+
+sum(sapply(icais, function(icai) icai$converged))
+```
+
+```{r}
+s_i_stacked <- vapply(icais, function(icai) {
+  icai$S
+}, matrix(0, nrow = nrow(mat), ncol = dim_s))
+dim(s_i_stacked) <- c(nrow(mat), dim_s * n_iter)
+s_i_stacked <- t(s_i_stacked)
+```
+
+```{r}
+emb3 <- umap(s_i_stacked, umap.settings2)
+
+ggplot(data.frame(emb3$layout), aes(X1, X2)) +
+  geom_point(alpha = 0.1)
+```
+
+Turns out the Infomax algorithm is deterministic :')
+
+## Generating ICA data sets
+
+```{r}
+run_icas <- function(dat_path, ns_comp, out_path = NULL) {
+  set.seed(42)
+
+  ### Data prep
+  
+  dat_reg <- readRDS(dat_path)
+  
+  dat_reg_sr <- dat_reg %>%
+    filter(modality == "self_report", !is.na(value)) %>%
+    select(!c(study_start_date, treatment_start_date, modality)) %>%
+    group_by(variable) %>%
+    mutate(
+      logged = case_when(
+        min(value) == 0 ~ log(value + 1), # To prevent log(0) = NA values
+        TRUE ~ log(value)
+      ),
+      scaled = scale(value, scale = FALSE)
+    ) %>%
+    ungroup()
+  
+  df <- dat_reg_sr %>%
+    select(!c(value, scaled)) %>% 
+    pivot_wider(names_from = variable, values_from = logged) %>%
+    arrange(subject, date) 
+  
+  subs <- df$subject
+  dates <- df$date
+  
+  df <- df %>%
+    select(!c(subject, date))
+  
+  # t x q
+  mat <- sapply(df, as.vector)
+  
+  means <- colMeans(mat)
+  
+  ### Running the ICAs
+  
+  icas <- vector("list", length(ns_comp))
+  names(icas) <- ns_comp
+  
+  for (i in 1:length(ns_comp)) {
+    icas[[i]] <- fastICA(mat, ns_comp[i], alg.typ = "parallel", fun = "logcosh")
+  }
+  
+  if (!is.null(out_path))
+    save(icas, subs, dates, file = out_path)
+  
+  icas
+}
+
+icas <- run_icas(dat_path = file.path(dat_dir, "dat_reg_semi_contiguous.rds"),
+                 ns_comp = c(5, 10, 20),
+                 out_path = file.path(dat_dir, "dat_reg_contig_icas.rda"))
+```
+
+### Examining 5 IC decomposition
+
+```{r}
+library(grid)
+
+var_dict <- list(
+  "ASIQ1_betternotalive" = "BetterNotAlive",
+  "ASIQ2_thoughtkill" = "ThoughtKillMyself",
+  "ASIQ3_thoughthow" = "ThoughtHowKill",
+  "ASIQ4_thoughtwhen" = "ThoughtWhenKill",
+  "ASIQ9_wishdead" = "WishedWereDead",
+  "ASIQ16_thoughtways" = "ThoughtWaysKill",
+  "ASIQ17_thoughtkillnotdo" = "ThoughtKillNotDo",
+  "ASIQ19_lifenotworth" = "LifeNotWorth",
+  "ASIQ25_notbetterkill" = "IfNotBetterKill",
+  "BAM1" = "CrawlOutSkin",
+  "BAM2_stirredupscream" = "StirredUpWantedScream",
+  "BAM3" = "EmotionalTurmoilGut",
+  "BITe1" = "Grumpy",
+  "BITe2" = "MightSnap",
+  "BITe3" = "PeopleOnNerves",
+  "BITe4" = "MoreBothered",
+  "BITe5" = "Irritable",
+  "DRSP1_depblue" = "FeltDepressed",
+  "DRSP2_hopeless" = "FeltHopeless",
+  "DRSP3_worthguilt" = "FeltWorthless",
+  "DRSP4_anxious" = "FeltAnxious",
+  "DRSP5_moodswings" = "MoodSwings",
+  "DRSP6_rejsens" = "RejectionSensitivity",
+  "DRSP8_intconflict" = "InterpersonalConflict",
+  "DRSP9_lessint" = "LackingInterest",
+  "DRSP16_overwhelm" = "FeltOverwhelmed",
+  "DRSP17_outofcontrol" = "FeltOutOfControl",
+  "DRSPx_notenjoy" = "Anhedonia",
+  "DRSPx_unmotivated" = "Unmotivated",
+  "belonging_" = "FeltConnected",
+  "mastery" = "FeltCapable",
+  "wantedkill" = "WantedKillMyself",
+  "wishsleep" = "WishNotWakeUp",
+  "PANAS_happy" = "FeltHappy"
+)
+
+fancy_mix_fig <- function(ica, n_row = 1, lims = c(-0.5, 0.5), 
+                          save_path = NULL, width = 16.18, height = 10) {
+  cols <- c("lightcoral", "aquamarine3", "turquoise4", "sienna", "darkorange3", 
+            "tan1", "indianred3", "steelblue")
+  
+  A <- ica$A
+  mix_df <- data.frame(A) %>%
+    rename_with(function(x) colnames(mat)) %>%
+    add_column(ic = 1:nrow(A), .before = 1) %>%
+    pivot_longer(!ic, names_to = "variable", values_to = "loading") %>%
+    mutate( # Add some questionnaire grouping information.
+      questionnaire = case_when(
+        str_starts(variable, "ASIQ") ~ "ASIQ",
+        variable == "belonging_" ~ "INQ",
+        str_starts(variable, "BAM") ~ "BAM",
+        str_starts(variable, "BITe") ~ "BITe",
+        str_starts(variable, "DRSP") ~ "DRSP",
+        variable == "mastery" | variable == "wishsleep" | variable == "wantedkill" ~ "Misc",
+        variable == "PANAS_happy"  ~ "PANAS"
+      ),
+      variable = var_dict[variable],
+      variable = fct_rev(factor(variable, var_dict, ordered = TRUE)),
+      variable_code = as.numeric(variable)
+    )
+  
+  n_ics <- n_distinct(mix_df$ic)
+
+  # Custom annotation function
+  ann <- function(grob, 
+                  xmin = -Inf, xmax = Inf, 
+                  ymin = -Inf, ymax = Inf, 
+                  data) {
+    layer(data = data, stat = StatIdentity, position = PositionIdentity, 
+          geom = ggplot2:::GeomCustomAnn,
+          inherit.aes = TRUE, params = list(grob = grob, 
+                                            xmin = xmin, xmax = xmax, 
+                                            ymin = ymin, ymax = ymax))
+  }
+  
+  g <- ggplot(mix_df, aes(loading, 
+                          variable_code, 
+                          fill = questionnaire, 
+                          alpha = abs(loading))) +
+    # annotate(geom = "rect", xmin = -0.5, xmax = 0.5, ymin = 0.5, ymax = 9.5, fill = alpha("steelblue", 0.5)) + 
+    # annotate(geom = "tile", x = 0, y = 11, width = 1, height = 3, fill = alpha("sienna", 0.5)) + 
+    geom_col(aes(group = questionnaire), orientation = "y") +
+    facet_wrap(~ ic, nrow = n_row, labeller = as_labeller(function(x) {
+      paste("IC", 1:n_ics)
+    })) +
+    scale_y_continuous(breaks = 1:max(mix_df$variable_code), 
+                       labels = levels(mix_df$variable)) +
+    # scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+    #                      name = "Loading") +
+    scale_fill_manual(values = cols, name = "Questionnaire") +
+    scale_alpha_continuous(guide = "none") +
+    xlim(lims[1], lims[2]) +
+    xlab("Loading") +
+    ylab("Variable") +
+    theme(text = element_text(size = 22),
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          # axis.text.y = element_blank(),
+          axis.text.y = element_text(size = 10, margin = margin(0, 20, 0, 0)),
+          axis.ticks.y = element_blank(),
+          plot.margin = unit(c(1, 1, 1, 5), "lines"),
+          panel.background = element_rect(fill = "white"),
+          panel.grid.major = element_line(color = "lightgrey"),
+          strip.background = element_rect("white"))
+  
+  # Add fancy annotations
+  ics <- 1:n_ics
+  ics_per_row <- n_ics / n_row # Assume no remainder
+  left_ics <- ics[(ics - 1) %% ics_per_row == 0]
+  pan_left_dat <- mix_df %>% filter(ic %in% left_ics) # Only draw the annotation for the left panels
+  
+  ann_x <- -0.6 - 0.004 * n_ics^2
+  ann_x <- {
+    if (n_ics == 5)
+      -0.6
+    else if (n_ics == 10)
+      -0.62
+    else
+      -0.8
+  }
+  
+  lwd <- 10
+  
+  q_groups <- sort(unique(mix_df$questionnaire))
+  
+  for (i in 1:length(q_groups)) {
+    q_dat <- mix_df %>%
+      filter(questionnaire == q_groups[i]) %>%
+      summarize(
+        min_var_code = min(variable_code),
+        max_var_code = max(variable_code)
+      )
+    
+    g <- g +
+      ann(linesGrob(gp = gpar(col = cols[i], lwd = lwd)), 
+        xmin = ann_x, xmax = ann_x, 
+        ymin = q_dat$min_var_code[[1]], ymax = q_dat$max_var_code[[1]], 
+        data = pan_left_dat)
+  }
+  
+  # Code to override clipping
+  gt <- ggplotGrob(g)
+  gt$layout[grepl("panel", gt$layout$name), ]$clip <- "off"
+  
+  # Draw the plot
+  grid.newpage()
+  grid.draw(gt)
+  
+  if (!is.null(save_path)) {
+    pdf(save_path, width = width, height = height)
+    
+    grid.newpage()
+    grid.draw(gt)
+    
+    dev.off()
+  }
+}
+```
+
+```{r fig.height=10, paged.print=FALSE}
+fancy_mix_fig(icas$`5`, file.path(man_img_dir, "mixing_matrix_5_test.pdf"))
+```
+
+```{r fig.height=10}
+ggplot(mix_df, aes(loading, variable, fill = loading)) +
+  geom_col() +
+  facet_wrap(~ ic, nrow = 1) +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  xlim(-0.6, 0.6) +
+  xlab("Loading") +
+  ylab("Variable") +
+  theme(text = element_text(size = 22),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggsave(file.path(man_img_dir, "mixing_matrix_5_app.pdf"))
+```
+
+### Examining 10 IC decomposition
+
+```{r fig.height=15, fig.width=15}
+mix_df <- data.frame(icas$`10`$A) %>%
+  rename_with(function(x) colnames(mat)) %>%
+  add_column(ic = 1:nrow(icas$`10`$A), .before = 1) %>%
+  pivot_longer(!ic, names_to = "variable", values_to = "loading") %>%
+  mutate(
+    variable = var_dict[variable],
+    variable = fct_rev(factor(variable, var_dict, ordered = TRUE)),
+    variable_code = as.numeric(variable)
+  )
+
+ggplot(mix_df, aes(loading, variable, fill = loading)) +
+  geom_col() +
+  facet_wrap(~ ic, nrow = 2) +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  xlim(-0.6, 0.6) +
+  xlab("Loading") +
+  ylab("Variable") +
+  theme(text = element_text(size = 22, family = "serif"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggsave(file.path(man_img_dir, "mixing_matrix_10_app.pdf"))
+```
+
+```{r fig.height=15, fig.width=15}
+fancy_mix_fig(icas$`10`, n_row = 2, 
+              save_path = file.path(man_img_dir, "mixing_matrix_10.pdf"),
+              width = 15, height = 15)
+```
+
+
+### Examining 20 IC decomposition
+
+```{r fig.height=15, fig.width=15}
+mix_df <- data.frame(icas$`20`$A) %>%
+  rename_with(function(x) colnames(mat)) %>%
+  add_column(ic = 1:nrow(icas$`20`$A), .before = 1) %>%
+  pivot_longer(!ic, names_to = "variable", values_to = "loading") %>%
+  mutate(
+    variable = var_dict[variable],
+    variable = fct_rev(factor(variable, var_dict, ordered = TRUE)),
+    variable_code = as.numeric(variable)
+  )
+
+ggplot(mix_df, aes(loading, variable, fill = loading)) +
+  geom_col() +
+  facet_wrap(~ ic, nrow = 2) +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       name = "Loading") +
+  xlim(-0.6, 0.6) +
+  xlab("Loading") +
+  ylab("Variable") +
+  theme(text = element_text(size = 22, family = "serif"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggsave(file.path(man_img_dir, "mixing_matrix_20_app.pdf"))
+```
+
+```{r fig.height=15, fig.width=15}
+fancy_mix_fig(icas$`20`, n_row = 2, lims = c(-0.6, 0.6), 
+              save_path = file.path(man_img_dir, "mixing_matrix_20.pdf"),
+              width = 15, height = 15)
+```
+
+### Taking a peek at >5 ICs
+
+```{r fig.height=10}
+for (n_ic in 1:10) {
+  ica_x <- fastICA(mat, n_ic, alg.typ = "parallel", fun = "logcosh")
+  
+  mix_df <- data.frame(ica_x$A) %>%
+    rename_with(function(x) colnames(mat)) %>%
+    add_column(ic = 1:nrow(ica_x$A), .before = 1) %>%
+    pivot_longer(!ic, names_to = "variable", values_to = "loading")
+  
+  g <- ggplot(mix_df, aes(loading, variable, fill = loading)) +
+    geom_col() +
+    facet_wrap(~ ic, nrow = 2) +
+    scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                         name = "Loading") +
+    xlab("Loading")
+  
+  print(g)
+}
+```
+
+## Fragmented self-report data
+
+```{r fig.height=10}
+ica_frag <- run_icas(file.path(dat_dir, "dat_reg_fragmented.rds"), 
+                     ns_comp = c(5),
+                     out_path = file.path(dat_dir, "dat_reg_frag_icas.rda"))
+
+fancy_mix_fig(ica_frag[[1]], 
+              lims = c(-0.6, 0.6),
+              save_path = file.path(man_img_dir, "mixing_matrix_5_frag.pdf"))
+```
+
