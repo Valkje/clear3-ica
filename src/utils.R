@@ -336,7 +336,9 @@ link_tdia_date <- function(tdias, sampled_idx, subjects, dats_kp, weekly) {
 }
 
 # Prints relevant model estimates to a neat csv
-estimates_to_csv <- function(file, models, include_corrected = FALSE) {
+estimates_to_csv <- function(
+  file, models, include_corrected = FALSE, transpose = FALSE
+) {
   terms <- c("medianIKD", "percent95IKD", "madIKD", "autocorrectRate",
              "backspaceRate", "totalKeyPresses", "active", "upright")
 
@@ -381,7 +383,18 @@ estimates_to_csv <- function(file, models, include_corrected = FALSE) {
   })
 
   df <- bind_cols(ests) %>%
-    mutate(across(everything(), ~ sprintf("%#.2g", .x)))
+    mutate(
+      across(everything(), function(x) {
+        x <- sprintf("%#.2g", x)
+        x[x == "1.0"] <- "1"
+        x
+      })
+    )
+
+  if (transpose) {
+    # Transpose, convert back to data frame, reverse columns
+    df <- rev(data.frame(t(df), check.names = FALSE))
+  }
 
   write.csv(df, file)
 
