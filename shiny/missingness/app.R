@@ -614,6 +614,9 @@ server <- function(input, output) {
 
     saveRDS(dat, file.path(dat_dir, "dat_reg_fragmented.rds"))
 
+    # Missingness markers might be useful later on
+    saveRDS(na_pat_col, file.path(dat_dir, "missingness_fragmented.rds"))
+
     message("Data saved successfully.")
   })
 }
