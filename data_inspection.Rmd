@@ -839,3 +839,36 @@ ggplot(dat_rep_trimmed, aes(daterated, firstdayofperiod)) +
   facet_wrap(~ id, scales = "free_x")
 ```
 
+# ICs vs fragmentation
+
+```{r}
+load(file.path(dat_dir, "dat_reg_frag_icas.rda"))
+na_pat <- readRDS(file.path(dat_dir, "missingness_fragmented.rds"))
+```
+
+```{r}
+s_df <- data.frame(icas[[1]]$S) %>%
+  add_column(subject = subs, date = dates, .before = 1)
+
+s_df
+```
+
+
+```{r}
+na_s <- na_pat %>%
+  pivot_wider(names_from = modality, values_from = good_block) %>%
+  left_join(s_df, by = c("subject", "date")) %>%
+  select(!c(X3, X4, X5)) %>%
+  pivot_longer(X1:X2, names_to = "ic")
+
+na_s
+```
+
+```{r fig.height=15}
+ggplot(na_s, aes(date)) +
+  geom_line(aes(y = value, color = ic)) +
+  geom_tile(aes(y = -3, fill = self_report)) +
+  scale_fill_manual(values = c("grey", "steelblue")) +
+  facet_wrap(~ subject, scales = "free_x")
+```
+
