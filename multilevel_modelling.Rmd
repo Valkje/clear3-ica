@@ -32,88 +32,9 @@ source("src/load_dependencies.R")
 options(OutDec = "·")
 ```
 
-```{r}
-# Semi-contiguous data
-dat_reg_contig <- readRDS(file.path(dat_dir, "dat_reg_semi_contiguous.rds"))
-dat_reg_contig
-```
-
-```{r}
-dat_bi <- dat_reg_contig %>%
-  filter(modality == "biaffect") %>%
-  select(!c(study_start_date, treatment_start_date, modality)) %>%
-  pivot_wider(names_from = variable, values_from = value) %>%
-  select(!partition_idx)
-
-dat_bi
-```
-
-```{r}
-dat_sr <- dat_reg_contig %>%
-  filter(modality == "self_report") %>%
-  select(!c(study_start_date, treatment_start_date, modality)) %>%
-  pivot_wider(names_from = variable, values_from = value)
-
-dat_sr
-```
-
-
-# Combine with ICs
-
-```{r}
-load(file.path(dat_dir, "dat_reg_contig_icas.rda"))
-ns_comp <- as.integer(names(icas))
-```
-
-```{r}
-data.frame(icas[[1]]$S) %>%
-  add_column(date = dates, subject = subs)
-```
-
-```{r}
-dats <- lapply(icas, function(ica) {
-  data.frame(ica$S) %>%
-    add_column(subject = subs, date = dates) %>%
-    inner_join(dat_bi, by = c("subject", "date")) %>%
-    mutate(
-      week = week(date),
-      sub_week = paste(subject, week, sep = " - ") # For convenience
-    ) %>%
-    relocate(subject, date, week, sub_week, .before = X1)
-})
-
-names(dats) <- ns_comp
-
-dats[[1]]
-```
-
-# Trash weeks within subjects with only one observation
-
-```{r}
-print(str_glue("Entries in data: {nrow(dats[[1]])}"))
-print(str_glue("\tNumber of subjects: {n_distinct(dats[[1]]$subject)}"))
-
-dats_f <- lapply(dats, function(dat) {
-  dat %>%
-    group_by(sub_week) %>%
-    filter(n() > 1) %>%
-    ungroup()
-})
-
-print(str_glue("Entries in data after filtering out weeks with one observation: {nrow(dats_f[[1]])}"))
-print(str_glue("\tNumber of subjects: {n_distinct(dats_f[[1]]$subject)}"))
-```
-
-```{r}
-subs <- dats_f[[1]]$subject
-print(table(subs))
-n_distinct(subs)
-```
-
-
 # Set apart a portion of the data as validation set
 
-```{r}
+```{r eval=FALSE}
 set.seed(42)
 
 # Minimal threshold for proportion of the data that goes towards validation
@@ -144,7 +65,7 @@ print(val_prop)
 print(val_subs)
 ```
 
-```{r}
+```{r eval=FALSE}
 # # Validation data
 # dats_v <- lapply(dats_f, function(dat) {
 #   dat %>%
@@ -161,6 +82,96 @@ print(val_subs)
 dats_t <- dats_f
 ```
 
+# Data prep function
+
+```{r}
+prep_reg_dat <- function(dat_path, ica_path) {
+  # Semi-contiguous or fragmented data
+  dat_reg <- readRDS(dat_path)
+  
+  dat_bi <- dat_reg %>%
+    filter(modality == "biaffect") %>%
+    select(!c(study_start_date, treatment_start_date, modality)) %>%
+    pivot_wider(names_from = variable, values_from = value) %>%
+    select(!partition_idx)
+  
+  print(str_glue("Number of BiAffect cases: {nrow(dat_bi)}"))
+  print(str_glue("\tNumber of subjects: {n_distinct(dat_bi$subject)}"))
+  
+  dat_sr <- dat_reg %>%
+    filter(modality == "self_report") %>%
+    select(!c(study_start_date, treatment_start_date, modality)) %>%
+    pivot_wider(names_from = variable, values_from = value)
+  
+  print(str_glue("Number of self-report cases: {nrow(dat_sr)}"))
+  print(str_glue("\tNumber of subjects: {n_distinct(dat_sr$subject)}"))
+  
+  # RDA file
+  load(ica_path)
+  ns_comp <- as.integer(names(icas))
+  
+  # Combine BiAffect data with self-report ICs
+  dats <- lapply(icas, function(ica) {
+    data.frame(ica$S) %>%
+      add_column(subject = subs, date = dates) %>%
+      inner_join(dat_bi, by = c("subject", "date")) %>%
+      mutate(
+        week = week(date),
+        sub_week = paste(subject, week, sep = " - ") # For convenience
+      ) %>%
+      relocate(subject, date, week, sub_week, .before = X1)
+  })
+  
+  # Trash weeks within subject with only one observation
+  print(str_glue("Complete-case entries in combined data: {nrow(dats[[1]])}"))
+  print(str_glue("\tNumber of subjects: {n_distinct(dats[[1]]$subject)}"))
+  
+  dats_f <- lapply(dats, function(dat) {
+    dat %>%
+      group_by(sub_week) %>%
+      filter(n() > 1) %>%
+      ungroup()
+  })
+  
+  print(str_glue("Entries in data after filtering out weeks with one observation: {nrow(dats_f[[1]])}"))
+  print(str_glue("\tNumber of subjects: {n_distinct(dats_f[[1]]$subject)}"))
+  
+  dats_c <- lapply(dats_f, function(dat) {
+    dat %>%
+      mutate(
+        totalKeyPresses = log(totalKeyPresses),
+        across(medianIKD:mean_accuracy, scale)
+      )
+  })
+  
+  list(
+    dat_reg = dat_reg, 
+    dat_bi = dat_bi, 
+    dat_sr = dat_sr, 
+    icas = icas,
+    subs = subs,
+    dates = dates,
+    dats_c = dats_c
+  )
+}
+```
+
+```{r}
+ls <- prep_reg_dat(
+  dat_path = file.path(dat_dir, "dat_reg_semi_contiguous.rds"),
+  ica_path = file.path(dat_dir, "dat_reg_contig_icas.rda")
+)
+
+dat_reg_contig <- ls$dat_reg
+dat_bi <- ls$dat_bi
+dat_sr <- ls$dat_sr
+icas <- ls$icas
+subs <- ls$subs
+dates <- ls$dates
+dats_c <- ls$dats_c
+```
+
+
 # Examine IC behavior per grouping factor
 
 Different people might experience a week differently. A good week for me could be a bad week for you, so it seems warranted to model a random effect of week within subject. We thought about including month as well, but that might be highly collinear with week. Perhaps we could include a random effect of menstrual cycle as well, but that might saturate the model - we'll check later whether this is possible. All in all, we hypothesise the following random effects:
@@ -169,20 +180,6 @@ Different people might experience a week differently. A good week for me could b
 * Week (within subject).
 
 The first thing we have to do is check whether this grouping structure is justified. We start by plotting the data.
-
-Before we proceed, we should scale the BiAffect data. In addition, totalKeyPresses should be log-transformed:
-
-```{r}
-dats_c <- lapply(dats_t, function(dat) {
-  dat %>%
-    mutate(
-      totalKeyPresses = log(totalKeyPresses),
-      across(medianIKD:mean_accuracy, scale)
-    )
-})
-
-dats_c[[1]]
-```
 
 Intermezzo: How correlated are active, upright, and bed?
 
@@ -232,12 +229,6 @@ We do. Technically, we would need to check all fixed effects, but that would be 
 Let's check for week nested within subject:
 
 ```{r fig.height=10}
-ggplot(dat_c1 %>%
-        mutate(sub_week = paste(subject, week(date), sep = " - ")), 
-       aes(X1, sub_week)) +
-geom_point() +
-labs(title = sub)
-
 for (sub in unique(dat_c1$subject)) {
   g <- ggplot(dat_c1 %>%
                 filter(subject == sub) %>%
@@ -506,7 +497,7 @@ summary(m5.X1.1.2)
 
 ### Fixed-effect backwards fitting for IC 1
 
-```{r}
+```{r eval=FALSE}
 m5.X1.3 <- update(m5.X1, X1 ~ mean_accuracy + 
                            medianIKD +
                            percent95IKD +
@@ -519,7 +510,7 @@ m5.X1.3 <- update(m5.X1, X1 ~ mean_accuracy +
 anova(m5.X1, m5.X1.3)
 ```
 
-```{r}
+```{r eval=FALSE}
 m5.X1.4 <- update(m5.X1.3, X1 ~ mean_accuracy + 
                              medianIKD +
                              percent95IKD +
@@ -532,7 +523,7 @@ m5.X1.4 <- update(m5.X1.3, X1 ~ mean_accuracy +
 anova(m5.X1.3, m5.X1.4)
 ```
 
-```{r}
+```{r eval=FALSE}
 m5.X1.5 <- update(m5.X1.4, X1 ~ mean_accuracy + 
                              medianIKD +
                              percent95IKD +
@@ -544,7 +535,7 @@ m5.X1.5 <- update(m5.X1.4, X1 ~ mean_accuracy +
 anova(m5.X1.4, m5.X1.5)
 ```
 
-```{r}
+```{r eval=FALSE}
 m5.X1.6 <- update(m5.X1.5, X1 ~ mean_accuracy + 
                              medianIKD +
                              percent95IKD +
@@ -555,7 +546,7 @@ m5.X1.6 <- update(m5.X1.5, X1 ~ mean_accuracy +
 anova(m5.X1.5, m5.X1.6)
 ```
 
-```{r}
+```{r eval=FALSE}
 m5.X1.7 <- update(m5.X1.6, X1 ~ mean_accuracy + 
                              medianIKD +
                              percent95IKD +
@@ -565,7 +556,7 @@ m5.X1.7 <- update(m5.X1.6, X1 ~ mean_accuracy +
 anova(m5.X1.6, m5.X1.7)
 ```
 
-```{r}
+```{r eval=FALSE}
 m5.X1.8 <- update(m5.X1.7, X1 ~ mean_accuracy + 
                              medianIKD +
                              active +
@@ -574,7 +565,7 @@ m5.X1.8 <- update(m5.X1.7, X1 ~ mean_accuracy +
 anova(m5.X1.7, m5.X1.8)
 ```
 
-```{r}
+```{r eval=FALSE}
 m5.X1.9 <- update(m5.X1.8, X1 ~ mean_accuracy + 
                              active +
                              (1 | subject / week))
@@ -582,20 +573,20 @@ m5.X1.9 <- update(m5.X1.8, X1 ~ mean_accuracy +
 anova(m5.X1.8, m5.X1.9)
 ```
 
-```{r}
+```{r eval=FALSE}
 m5.X1.10 <- update(m5.X1.9, X1 ~ active +
                               (1 | subject / week))
 
 anova(m5.X1.9, m5.X1.10)
 ```
 
-```{r}
+```{r eval=FALSE}
 m5.X1.11 <- update(m5.X1.10, X1 ~ (1 | subject / week))
 
 anova(m5.X1.10, m5.X1.11)
 ```
 
-```{r}
+```{r eval=FALSE}
 m5.X1.12 <- update(m5.X1.10, X1 ~ active - 1 +
                               (1 | subject / week))
 
@@ -604,21 +595,21 @@ anova(m5.X1.10, m5.X1.12)
 
 Final model:
 
-```{r}
+```{r eval=FALSE}
 summary(m5.X1.10)
 ```
 
-```{r}
+```{r eval=FALSE}
 m5.X1.10.nlme <- lme(X1 ~ active, dat_c1_m, ~ 1 | subject / week)
 m5.X1.10.nlme
 ```
 
-```{r paged.print=FALSE}
+```{r paged.print=FALSE, eval=FALSE}
 summ <- summary(m5.X1.10.nlme)
 summ
 ```
 
-```{r}
+```{r eval=FALSE}
 summ$tTable
 ```
 
@@ -1262,4 +1253,336 @@ lapply(m20.all.nlme, function(m) {
 })
 ```
 
+# Fragmented data
 
+```{r}
+ls <- prep_reg_dat(
+  dat_path = file.path(dat_dir, "dat_reg_fragmented.rds"),
+  ica_path = file.path(dat_dir, "dat_reg_frag_icas.rda")
+)
+
+dat_reg_frag <- ls$dat_reg
+dat_bi <- ls$dat_bi
+dat_sr <- ls$dat_sr
+icas <- ls$icas
+subs <- ls$subs
+dates <- ls$dates
+dats_c_frag <- ls$dats_c
+```
+
+```{r}
+dat_c1_frag <- dats_c_frag[[1]]
+```
+
+
+## Examining need for random effects
+
+Now we will double check the necessity for the hypothesised random effects with `lmList`.
+
+```{r}
+m5.frag.sub_list <- lme4::lmList(X1 ~ medianIKD +
+                                   percent95IKD +
+                                   madIKD +
+                                   autocorrectRate +
+                                   backspaceRate +
+                                   totalKeyPresses +
+                                   active +
+                                   upright | 
+                                   subject,
+                                 data = dat_c1_frag)
+
+m5.frag.sub_list
+```
+
+```{r fig.height=10}
+plot(confint(m5.frag.sub_list))
+```
+
+We cannot make interval plots for `subject/week`, as we always have more predictors than observations (a maximum of 7 per week). We therefore do it for `week` instead.
+
+```{r}
+m5.frag.week_list <- lme4::lmList(X1 ~ mean_accuracy + 
+                                    medianIKD +
+                                    percent95IKD +
+                                    madIKD +
+                                    autocorrectRate +
+                                    backspaceRate +
+                                    totalKeyPresses +
+                                    active +
+                                    upright | 
+                                    week,
+                                  data = dat_c1_frag)
+
+m5.frag.week_list
+```
+
+```{r fig.height=10}
+plot(confint(m5.frag.week_list))
+```
+
+## 5 components
+
+```{r}
+m5.frag.X1 <- lmer(X1 ~ medianIKD +
+                     percent95IKD +
+                     madIKD +
+                     autocorrectRate +
+                     backspaceRate +
+                     totalKeyPresses +
+                     active +
+                     upright +
+                     (1 | subject / week),
+                   data = dat_c1_frag)
+
+m5.frag.X1
+```
+
+```{r}
+summary(m5.frag.X1)
+```
+
+NLME gives us p-values, necessary if we want to do multiple comparisons corrections.
+
+```{r}
+m5.frag.X1.nlme <- lme(X1 ~ medianIKD +
+                         percent95IKD +
+                         madIKD +
+                         autocorrectRate +
+                         backspaceRate +
+                         totalKeyPresses +
+                         active +
+                         upright,
+                       random = ~ 1 | subject / week,
+                       data = dat_c1_frag)
+
+m5.frag.all.nlme <- dat_c1_frag %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(update(m5.frag.X1.nlme, 
+                                 reformulate(".", cur_column())))))
+
+m5.frag.all.nlme
+```
+
+```{r paged.print=FALSE}
+lapply(m5.frag.all.nlme, function(m) summary(m[[1]]))
+```
+
+```{r}
+p_df <- estimates_to_csv(file.path(dat_dir, "m5_nlme_p_frag.csv"), 
+                         m5.frag.all.nlme, 
+                         include_corrected = TRUE)
+
+p_df
+```
+
+### Validation
+
+Check for heteroskedasticity of residuals.
+
+```{r}
+lapply(m5.frag.all.nlme, function(m) plot(m[[1]]))
+```
+
+Lethargy model shows some structure in residuals. Let's plot actual values vs fitted values.
+
+```{r}
+fits <- fitted(m5.frag.all.nlme[[2]][[1]])
+plot(fits, dat_c1_frag$X2)
+abline(0, 1)
+grid()
+```
+
+There is a rather large proportion of -1 values that are not captured very well by the model fit. These might correspond to the 0 ratings on the Likert scales.
+
+```{r}
+hist(dat_c1_frag$X2)
+```
+
+Plotting the active values vs raw X2 shows very little correlation:
+
+```{r}
+plot(dat_c1_frag$X2, dat_c1_frag$active)
+```
+
+Only when we remove the random effects from the fitted values, the correlation appears:
+
+```{r}
+plot(fitted(m5.frag.all.nlme[[2]][[1]], level = 0), dat_c1_frag$active)
+```
+
+This could be a point of criticism for this model.
+
+Normality of residuals.
+
+```{r}
+lapply(m5.frag.all.nlme, function(m) {
+  m <- m[[1]]
+  qqnorm(resid(m))
+  qqline(resid(m))
+})
+```
+
+Subject-level random effects.
+
+```{r}
+lapply(m5.frag.all.nlme, function(m) {
+  m <- m[[1]]
+  refs <- ranef(m, level = 1)[[1]]
+  qqnorm(refs)
+  qqline(refs)
+})
+```
+
+Week-within-subjects-level random effects.
+
+```{r}
+lapply(m5.frag.all.nlme, function(m) {
+  m <- m[[1]]
+  refs <- ranef(m, level = 2)[[1]]
+  qqnorm(refs)
+  qqline(refs)
+})
+```
+
+
+## 10 components
+
+```{r}
+dat_c2_frag <- dats_c_frag[[2]]
+
+m10.frag.X1.nlme <- lme(X1 ~ medianIKD +
+                           percent95IKD +
+                           madIKD +
+                           autocorrectRate +
+                           backspaceRate +
+                           totalKeyPresses +
+                           active +
+                           upright,
+                         random = ~ 1 | subject / week,
+                         data = dat_c2_frag)
+
+m10.frag.all.nlme <- dat_c2_frag %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(update(m10.frag.X1.nlme, 
+                                 reformulate(".", cur_column())))))
+
+m10.frag.all.nlme
+```
+
+```{r}
+estimates_to_csv(file.path(dat_dir, "m10_nlme_p_frag.csv"), 
+                 m10.frag.all.nlme, 
+                 include_corrected = TRUE,
+                 transpose = TRUE)
+```
+
+### Validation
+
+Check for heteroskedasticity of residuals.
+
+```{r}
+lapply(m10.frag.all.nlme, function(m) plot(m[[1]]))
+```
+
+Normality of residuals.
+
+```{r}
+lapply(m10.frag.all.nlme, function(m) {
+  m <- m[[1]]
+  qqnorm(resid(m))
+  qqline(resid(m))
+})
+```
+
+Subject-level random effects.
+
+```{r}
+lapply(m10.frag.all.nlme, function(m) {
+  m <- m[[1]]
+  refs <- ranef(m, level = 1)[[1]]
+  qqnorm(refs)
+  qqline(refs)
+})
+```
+
+Week-within-subjects-level random effects.
+
+```{r}
+lapply(m10.frag.all.nlme, function(m) {
+  m <- m[[1]]
+  refs <- ranef(m, level = 2)[[1]]
+  qqnorm(refs)
+  qqline(refs)
+})
+```
+
+## 20 components
+
+```{r}
+dat_c3_frag <- dats_c_frag[[3]]
+
+m20.frag.X1.nlme <- lme(X1 ~ medianIKD +
+                           percent95IKD +
+                           madIKD +
+                           autocorrectRate +
+                           backspaceRate +
+                           totalKeyPresses +
+                           active +
+                           upright,
+                         random = ~ 1 | subject / week,
+                         data = dat_c3_frag)
+
+m20.frag.all.nlme <- dat_c3_frag %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(update(m20.frag.X1.nlme, 
+                                 reformulate(".", cur_column())))))
+
+m20.frag.all.nlme
+```
+
+```{r}
+estimates_to_csv(file.path(dat_dir, "m20_nlme_p_frag.csv"), 
+                 m20.frag.all.nlme, 
+                 include_corrected = TRUE,
+                 transpose = TRUE)
+```
+
+### Validation
+
+Check for heteroskedasticity of residuals.
+
+```{r}
+lapply(m20.frag.all.nlme, function(m) plot(m[[1]]))
+```
+
+Normality of residuals.
+
+```{r}
+lapply(m20.frag.all.nlme, function(m) {
+  m <- m[[1]]
+  qqnorm(resid(m))
+  qqline(resid(m))
+})
+```
+
+Subject-level random effects.
+
+```{r}
+lapply(m20.frag.all.nlme, function(m) {
+  m <- m[[1]]
+  refs <- ranef(m, level = 1)[[1]]
+  qqnorm(refs)
+  qqline(refs)
+})
+```
+
+Week-within-subjects-level random effects.
+
+```{r}
+lapply(m20.frag.all.nlme, function(m) {
+  m <- m[[1]]
+  refs <- ranef(m, level = 2)[[1]]
+  qqnorm(refs)
+  qqline(refs)
+})
+```
