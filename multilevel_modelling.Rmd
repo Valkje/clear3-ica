@@ -768,39 +768,6 @@ m5.all.nlme
 lapply(m5.all.nlme, function(m) summary(m[[1]]))
 ```
 
-Get beta and significance values nicely formatted for copying into Word table.
-
-```{r}
-print_estimates <- function(models) {
-  for (m in models) {
-    summ <- summary(m[[1]])
-    tab <- summ$tTable
-    for (i in 1:nrow(tab)) {
-      v1 <- signif(tab[i, 1], 2)
-      v2 <- signif(tab[i, 5], 2)
-      cat(str_glue("{v1}\t{v2}\n\n"))
-    }
-    
-    cat("\n------------------------\n\n")
-  }
-}
-
-print_estimates(m5.all.nlme)
-```
-
-Get Bonferroni-corrected p values.
-
-```{r}
-lapply(m5.all.nlme, function(m) {
-  summ <- summary(m[[1]])
-  tab <- summ$tTable
-  for (i in 1:nrow(tab)) {
-    cat(paste0(signif(min(tab[i,5] * 5 * 8, 1), 2), "\n"))
-  }
-  cat("\n")
-})
-```
-
 ```{r}
 estimates_to_csv(file.path(dat_dir, "m5_nlme_p.csv"), 
                  m5.all.nlme, 
