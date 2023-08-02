@@ -5,7 +5,7 @@ library(ggplot2) # For calculating 2D histograms
 library(lubridate)
 
 # Preprocess the accelerometer data
-preproc_acc <- function(raw_acc, verbose = FALSE) {
+preproc_acc <- function(raw_acc, sub, verbose = FALSE) {
   # Small wrapper around boolean test and print
   vprint <- function(text) if (verbose) print(text)
 
@@ -50,7 +50,8 @@ preproc_acc <- function(raw_acc, verbose = FALSE) {
       zMedian = median(zFiltered),
       upright = zMedian < 0.1 & xMedian >= -0.2 & xMedian <= 0.2,
       bed = !(activeSes | upright)
-    )
+    ) %>%
+    add_column(subject = sub, .before = 1)
 
   vprint("Done with accelerometer data!")
 
@@ -80,7 +81,7 @@ classify_handedness <- function(IKD, distanceFromPrevious) {
 }
 
 # Preprocess the key press and accelerometer data, combine them
-preproc_kp <- function(raw_kp, dat_acc, verbose = FALSE) {
+preproc_kp <- function(raw_kp, dat_acc, sub, verbose = FALSE) {
   # Small wrapper around boolean test and print
   vprint <- function(text) if (verbose) print(text)
 
@@ -149,7 +150,8 @@ preproc_kp <- function(raw_kp, dat_acc, verbose = FALSE) {
     mutate(
       distanceFromPrevious = distanceFromPrevious * spec$scaleFactor / spec$PPI * 2.54,
       distanceFromCenter = distanceFromCenter * spec$scaleFactor / spec$PPI * 2.54,
-    )
+    ) %>%
+    add_column(subject = sub, .before = 1)
 
   vprint("Aggregating key press data...")
 
@@ -177,7 +179,8 @@ preproc_kp <- function(raw_kp, dat_acc, verbose = FALSE) {
       bed = bed[1],
       hour = format(sessionTimestampLocal, "%H"),
       date = as.Date(sessionTimestampLocal)
-    )
+    ) %>%
+    add_column(subject = sub, .before = 1)
 
   vprint("Done with key press data!")
 
