@@ -31,9 +31,6 @@ setwd(wd)
 
 source("src/load_dependencies.R")
 library(fastICA)
-
-# Because it's required by the Lancet
-options(OutDec = "·")
 ```
 
 # Get/set seed
@@ -121,7 +118,7 @@ prep_reg_dat <- function(dat_path, icas, subs, dates, general_idx) {
     filter(modality == "biaffect") %>%
     select(!c(study_start_date, treatment_start_date, modality)) %>%
     pivot_wider(names_from = variable, values_from = value) %>%
-    select(!partition_idx)
+    select(-any_of(c("partition_idx")))
   
   # Select components that correspond to general affect components
   dats <- map2(icas, general_idx, function(ica, idx) {
@@ -146,7 +143,7 @@ prep_reg_dat <- function(dat_path, icas, subs, dates, general_idx) {
     dat %>%
       mutate(
         totalKeyPresses = log(totalKeyPresses),
-        across(medianIKD:mean_accuracy, scale)
+        across(medianIKD:bed, scale)
       )
   })
   
@@ -155,15 +152,15 @@ prep_reg_dat <- function(dat_path, icas, subs, dates, general_idx) {
 ```
 
 ```{r}
-ls <- replicate_icas(file.path(dat_dir, "dat_reg_semi_contiguous.rds"),
-                     out_path = file.path(dat_dir, "icas_sens.rds"))
+ls <- replicate_icas(file.path(dat_dir, "dat_reg_semi_contiguous_no-tdia.rds"),
+                     out_path = file.path(dat_dir, "icas_sens_no-tdia.rds"))
 
 icas <- ls$icas
 subs <- ls$subs
 dates <- ls$dates
 ```
 
-We use sens_helper.R to mark the general affect components and save the marked component indices to general_idx_sens.rds.
+We use `sens_helper.R` to mark the general affect components and save the marked component indices to `general_idx_sens.rds`.
 
 ```{r}
 general_idx <- readRDS(file.path(dat_dir, "general_idx_sens.rds"))
@@ -175,7 +172,7 @@ general_idx <- as.integer(general_idx)
 Prepare data.
 
 ```{r}
-dats_c <- prep_reg_dat(file.path(dat_dir, "dat_reg_semi_contiguous.rds"),
+dats_c <- prep_reg_dat(file.path(dat_dir, "dat_reg_semi_contiguous_no-tdia.rds"),
                        icas, subs, dates,
                        general_idx)
 ```
@@ -273,6 +270,11 @@ table(signif(bonf_p_vals, 2))
 mean(bonf_p_vals > 0.001)
 ```
 
+```{r}
+round(bonf_p_vals, 5)
+```
+
+
 Proportion of smallest p values.
 
 ```{r}
@@ -336,7 +338,7 @@ for (i in seq(5, 100, 5)) {
 # Fragmented data
 
 ```{r}
-ls <- replicate_icas(file.path(dat_dir, "dat_reg_fragmented.rds"))
+ls <- replicate_icas(file.path(dat_dir, "dat_reg_fragmented_no-tdia.rds"))
 icas_frag <- ls$icas
 subs_frag <- ls$subs
 dates_frag <- ls$dates
@@ -352,7 +354,7 @@ Use sens_helper.R to get general_idx_frag.
 general_idx_frag <- readRDS(file.path(dat_dir, "general_idx_frag_sens2.rds"))
 general_idx_frag <- as.integer(general_idx_frag)
 
-dats_c_frag <- prep_reg_dat(file.path(dat_dir, "dat_reg_fragmented.rds"),
+dats_c_frag <- prep_reg_dat(file.path(dat_dir, "dat_reg_fragmented_no-tdia.rds"),
                        icas_frag, subs_frag, dates_frag,
                        general_idx_frag)
 
@@ -435,6 +437,10 @@ mean(p_val_df_frag[p_val_df_frag$variable == "active",]$value < 1e-5)
 Beta values.
 
 ```{r}
+table(signif(betas, 2))
+```
+
+```{r}
 betas <- sapply(models_frag, function(m) summary(m)$tTable["active", 1])
 range(betas)
 plot(bonf_p_vals, betas)
@@ -496,6 +502,18 @@ cols <- c("lightcoral", "aquamarine3", "turquoise4", "sienna", "darkorange3",
 
 n_ics <- 5
 
+# Custom annotation function
+ann <- function(grob,
+                xmin = -Inf, xmax = Inf,
+                ymin = -Inf, ymax = Inf,
+                data) {
+  layer(data = data, stat = StatIdentity, position = PositionIdentity,
+        geom = ggplot2:::GeomCustomAnn,
+        inherit.aes = TRUE, params = list(grob = grob,
+                                          xmin = xmin, xmax = xmax,
+                                          ymin = ymin, ymax = ymax))
+}
+
 A <- icas_frag[[6]]$A
 mix_df_general <- data.frame(A) %>%
   rename_with(function(x) mat_names) %>%
@@ -540,6 +558,8 @@ mix_df_lethargy <- data.frame(A) %>%
 
 mix_df <- rbind(mix_df_general, mix_df_lethargy)
 
+separator_df <- filter(mix_df, class == "General affect", ic == "IC 5")
+
 ggplot(mix_df, aes(loading, 
                    variable_code, 
                    fill = questionnaire, 
@@ -547,6 +567,8 @@ ggplot(mix_df, aes(loading,
   # annotate(geom = "rect", xmin = -0.5, xmax = 0.5, ymin = 0.5, ymax = 9.5, fill = alpha("steelblue", 0.5)) + 
   # annotate(geom = "tile", x = 0, y = 11, width = 1, height = 3, fill = alpha("sienna", 0.5)) + 
   geom_col(aes(group = questionnaire), orientation = "y") +
+  # geom_vline(aes(xintercept = x), data = separator_df) +
+  ann(linesGrob(gp = gpar(col = "grey50", lwd = 1.5)), xmin = 0.71, xmax = 0.71, ymin = -1, ymax = 37.5, data = separator_df) +
   facet_nested(~ class + ic) +
   scale_y_continuous(breaks = 1:max(mix_df$variable_code), 
                      labels = levels(mix_df$variable)) +
@@ -555,6 +577,7 @@ ggplot(mix_df, aes(loading,
   xlim(-0.6, 0.6) +
   xlab("Loading") +
   ylab("Variable") +
+  coord_cartesian(clip = "off") +
   theme(text = element_text(size = 22),
         axis.text.x = element_text(size = 14, angle = 90, vjust = 0.5, hjust = 1),
         # axis.text.y = element_blank(),
@@ -564,9 +587,9 @@ ggplot(mix_df, aes(loading,
         panel.background = element_rect(fill = "white"),
         panel.grid.major = element_line(color = "lightgrey"),
         strip.background = element_rect("white"),
-        ggh4x.facet.nestline = element_line(color = "lightgrey"))
+        ggh4x.facet.nestline = element_line(color = "grey50"))
 
-ggsave(file.path(man_img_dir, "mixing_matrix_classes_frag.pdf"), 
+ggsave(file.path(man_img_dir, "mixing_matrix_classes_frag.pdf"),
        width = 15, height = 10)
 ```
 
@@ -584,7 +607,7 @@ fancy_mix_fig(icas_cent[[2]],
               save_path = file.path(man_img_dir, "mixing_matrix_mean_centred.pdf"))
 ```
 
-Use sens_helper.R to get general_idx_cent.
+Use `sens_helper.R` to get `general_idx_cent`.
 
 ```{r}
 general_idx_cent <- readRDS(file.path(dat_dir, "general_idx_cent.rds"))

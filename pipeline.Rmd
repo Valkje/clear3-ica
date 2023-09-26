@@ -1,18 +1,21 @@
 ---
 title: "CLEAR-3 ICA analysis pipeline"
-output: 
+output:
   html_notebook:
-    toc: true
-    toc_float: true
+    toc: yes
+    df_print: paged
+    toc_float: yes
     theme: spacelab
+  pdf_document:
+    toc: yes
 ---
 
 This is a streamlined version of the analysis done in the manuscript, assembled from a variety of original analysis files. These files still reside in this repository for archival purposes (which means, unfortunately, that we have a certain degree of code duplication). 
 
 The pipeline is divided into three parts: Preprocessing, independent component analysis (ICA), and linear mixed-effects modelling. The meat of the preprocessing code has been delegated to R source files, which can be found in the `src` folder. The ICA and modelling code, on the other hand, is more verbose to allow easier exposition of, e.g., model structure.
 
-```{r setup}
-knitr::opts_chunk$set(message = FALSE)
+```{r setup, warning=FALSE}
+knitr::opts_chunk$set(cache = TRUE, message = FALSE)
 local <- TRUE
 
 wd <- ""
@@ -43,7 +46,7 @@ man_img_dir <- "~/Documents/Writing/Papers/Paper 1/images"
 
 These functions repair potential file errors, move files into a BIDS-like structure, and then perform filtering and aggregation where necessary.
 
-```{r}
+```{r eval=FALSE}
 source(file.path(src_dir, "preproc_all.R"))
 
 dir.create(dat_dir, showWarnings = FALSE, recursive = TRUE)
@@ -57,7 +60,7 @@ preproc_biaffect()
 
 Binds self-report and BiAffect data on the daily level. Also includes a bit of self-report cleaning.
 
-```{r}
+```{r eval=FALSE}
 source(file.path(src_dir, "join_selfreport_biaffect.R"))
 
 dat_reg <- join_selfreport_biaffect(
@@ -68,7 +71,7 @@ dat_reg <- join_selfreport_biaffect(
 
 Trim preprocessed data to only include baseline data.
 
-```{r}
+```{r eval=FALSE}
 source(file.path(src_dir, "trim_baseline.R"))
 
 trim_baseline(
@@ -92,7 +95,7 @@ source(file.path(src_dir, "ica.R"))
 ## Fragmented ICA
 
 ```{r fig.height=10}
-ica_frag <- run_icas(file.path(dat_dir, "dat_reg_fragmented.rds"), 
+ica_frag <- run_icas(file.path(dat_dir, "dat_reg_fragmented_no-tdia.rds"), 
                      ns_comp = c(5, 10, 20),
                      out_path = file.path(dat_dir, "dat_reg_frag_icas.rda"))
 
@@ -117,7 +120,7 @@ fancy_mix_fig(ica_frag[[3]],
 ## Semi-contiguous ICA
 
 ```{r fig.height=10}
-icas <- run_icas(dat_path = file.path(dat_dir, "dat_reg_semi_contiguous.rds"),
+icas <- run_icas(dat_path = file.path(dat_dir, "dat_reg_semi_contiguous_no-tdia.rds"),
                  ns_comp = c(5, 10, 20),
                  out_path = file.path(dat_dir, "dat_reg_contig_icas.rda"))
 
@@ -134,7 +137,7 @@ fancy_mix_fig(icas$`20`, n_row = 2, lims = c(-0.6, 0.6),
 ## Within-subject mean-centring
 
 ```{r fig.height=10}
-ica_norm <- run_icas(dat_path = file.path(dat_dir, "dat_reg_fragmented.rds"),
+ica_norm <- run_icas(dat_path = file.path(dat_dir, "dat_reg_fragmented_no-tdia.rds"),
                      ns_comp = c(5), sub_norm = TRUE)[[1]]
 
 fancy_mix_fig(ica_norm, 
@@ -154,7 +157,7 @@ source(file.path(src_dir, "lmer.R"))
 
 ```{r}
 ls <- prep_reg_dat(
-  dat_path = file.path(dat_dir, "dat_reg_fragmented.rds"),
+  dat_path = file.path(dat_dir, "dat_reg_fragmented_no-tdia.rds"),
   ica_path = file.path(dat_dir, "dat_reg_frag_icas.rda")
 )
 
@@ -188,7 +191,7 @@ m5.frag.all.nlme <- dat_c1_frag %>%
                    ~ list(update(m5.frag.X1.nlme, 
                                  reformulate(".", cur_column())))))
 
-estimates_to_csv(file.path(dat_dir, "m5_nlme_p_frag.csv"), 
+estimates_to_csv(file.path(dat_dir, "m5_nlme_p_frag_no-tdia.csv"), 
                            m5.frag.all.nlme, 
                            include_corrected = TRUE)
 ```
@@ -214,7 +217,7 @@ m10.frag.all.nlme <- dat_c2_frag %>%
                    ~ list(update(m10.frag.X1.nlme, 
                                  reformulate(".", cur_column())))))
 
-estimates_to_csv(file.path(dat_dir, "m10_nlme_p_frag.csv"), 
+estimates_to_csv(file.path(dat_dir, "m10_nlme_p_frag_no-tdia.csv"), 
                  m10.frag.all.nlme, 
                  include_corrected = TRUE,
                  transpose = TRUE)
@@ -241,7 +244,7 @@ m20.frag.all.nlme <- dat_c3_frag %>%
                    ~ list(update(m20.frag.X1.nlme, 
                                  reformulate(".", cur_column())))))
 
-estimates_to_csv(file.path(dat_dir, "m20_nlme_p_frag.csv"), 
+estimates_to_csv(file.path(dat_dir, "m20_nlme_p_frag_no-tdia.csv"), 
                  m20.frag.all.nlme, 
                  include_corrected = TRUE,
                  transpose = TRUE)
@@ -251,7 +254,7 @@ estimates_to_csv(file.path(dat_dir, "m20_nlme_p_frag.csv"),
 
 ```{r}
 ls <- prep_reg_dat(
-  dat_path = file.path(dat_dir, "dat_reg_semi_contiguous.rds"),
+  dat_path = file.path(dat_dir, "dat_reg_semi_contiguous_no-tdia.rds"),
   ica_path = file.path(dat_dir, "dat_reg_contig_icas.rda")
 )
 
@@ -284,7 +287,7 @@ m5.all.nlme <- dat_c1 %>%
   summarize(across(starts_with("X", ignore.case = FALSE), 
                    ~ list(update(m5.X1.nlme, reformulate(".", cur_column())))))
 
-estimates_to_csv(file.path(dat_dir, "m5_nlme_p.csv"), 
+estimates_to_csv(file.path(dat_dir, "m5_nlme_p_no-tdia.csv"), 
                  m5.all.nlme, 
                  include_corrected = TRUE)
 ```
@@ -309,7 +312,7 @@ m10.all.nlme <- dat_c2 %>%
   summarize(across(starts_with("X", ignore.case = FALSE), 
                    ~ list(update(m10.X1.nlme, reformulate(".", cur_column())))))
 
-estimates_to_csv(file.path(dat_dir, "m10_nlme_p.csv"), 
+estimates_to_csv(file.path(dat_dir, "m10_nlme_p_no-tdia.csv"), 
                  m10.all.nlme, 
                  include_corrected = TRUE)
 ```
@@ -334,7 +337,7 @@ m20.all.nlme <- dat_c3 %>%
   summarize(across(starts_with("X", ignore.case = FALSE), 
                    ~ list(update(m20.X1.nlme, reformulate(".", cur_column())))))
 
-estimates_to_csv(file.path(dat_dir, "m20_nlme_p.csv"), 
+estimates_to_csv(file.path(dat_dir, "m20_nlme_p_no-tdia.csv"), 
                  m20.all.nlme, 
                  include_corrected = TRUE)
 ```

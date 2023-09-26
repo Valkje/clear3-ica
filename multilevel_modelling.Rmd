@@ -82,7 +82,7 @@ print(val_subs)
 dats_t <- dats_f
 ```
 
-# Data prep function
+# Utility functions
 
 ```{r}
 prep_reg_dat <- function(dat_path, ica_path) {
@@ -93,7 +93,7 @@ prep_reg_dat <- function(dat_path, ica_path) {
     filter(modality == "biaffect") %>%
     select(!c(study_start_date, treatment_start_date, modality)) %>%
     pivot_wider(names_from = variable, values_from = value) %>%
-    select(!partition_idx)
+    select(-any_of(c("partition_idx")))
   
   print(str_glue("Number of BiAffect cases: {nrow(dat_bi)}"))
   print(str_glue("\tNumber of subjects: {n_distinct(dat_bi$subject)}"))
@@ -140,7 +140,7 @@ prep_reg_dat <- function(dat_path, ica_path) {
     dat %>%
       mutate(
         totalKeyPresses = log(totalKeyPresses),
-        across(medianIKD:mean_accuracy, scale)
+        across(medianIKD:bed, scale)
       )
   })
   
@@ -153,6 +153,39 @@ prep_reg_dat <- function(dat_path, ica_path) {
     dates = dates,
     dats_c = dats_c
   )
+}
+
+# Plot residuals and random effects for model validation.
+plot_validation <- function(model_df) {
+  # Check for heteroskedasticity of residuals.
+  
+  lapply(model_df, function(m) print(plot(m[[1]], main = "Residuals vs. fitted values")))
+  
+  # Normality of residuals.
+  
+  lapply(model_df, function(m) {
+    m <- m[[1]]
+    qqnorm(resid(m), main = "Residuals")
+    qqline(resid(m))
+  })
+  
+  # Subject-level random effects.
+  
+  lapply(model_df, function(m) {
+    m <- m[[1]]
+    refs <- ranef(m, level = 1)[[1]]
+    qqnorm(refs, main = "Subject-level random effects")
+    qqline(refs)
+  })
+  
+  # Week-within-subjects-level random effects.
+  
+  lapply(model_df, function(m) {
+    m <- m[[1]]
+    refs <- ranef(m, level = 2)[[1]]
+    qqnorm(refs, main = "Week-within-subjects-level random effects")
+    qqline(refs)
+  })
 }
 ```
 
@@ -1238,6 +1271,11 @@ dats_c_frag <- ls$dats_c
 ```
 
 ```{r}
+dat_reg_frag %>% group_by(variable) %>% summarize(n = n_distinct(value))
+```
+
+
+```{r}
 dat_c1_frag <- dats_c_frag[[1]]
 ```
 
@@ -1552,4 +1590,110 @@ lapply(m20.frag.all.nlme, function(m) {
   qqnorm(refs)
   qqline(refs)
 })
+```
+
+# Fragmented, no TDIA
+
+```{r}
+ls <- prep_reg_dat(
+  dat_path = file.path(dat_dir, "dat_reg_fragmented_no-tdia.rds"),
+  ica_path = file.path(dat_dir, "dat_reg_frag_icas.rda")
+)
+
+dat_reg_no_tdia <- ls$dat_reg
+dat_bi <- ls$dat_bi
+dat_sr <- ls$dat_sr
+icas <- ls$icas
+subs <- ls$subs
+dates <- ls$dates
+dats_c_no_tdia <- ls$dats_c
+```
+
+## 5 components
+
+```{r}
+dat_c1_no_tdia <- dats_c_no_tdia[[1]]
+
+m5.no_tdia.X1.nlme <- lme(X1 ~ medianIKD +
+                           percent95IKD +
+                           madIKD +
+                           autocorrectRate +
+                           backspaceRate +
+                           totalKeyPresses +
+                           active +
+                           upright,
+                         random = ~ 1 | subject / week,
+                         data = dat_c1_no_tdia)
+
+m5.no_tdia.all.nlme <- dat_c1_no_tdia %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(update(m5.no_tdia.X1.nlme, 
+                                 reformulate(".", cur_column())))))
+```
+
+```{r}
+plot_validation(m5.no_tdia.all.nlme)
+```
+
+Forwards-fitting of random effects
+
+```{r}
+lapply(m5.no_tdia.all.nlme, function (m) {
+  m <- m[[1]]
+  m.b <- update(m, random = ~ 1 | subject)
+  anova(m, m.b)
+})
+```
+
+
+## 10 components
+
+```{r}
+dat_c2_no_tdia <- dats_c_no_tdia[[2]]
+
+m10.no_tdia.X1.nlme <- lme(X1 ~ medianIKD +
+                             percent95IKD +
+                             madIKD +
+                             autocorrectRate +
+                             backspaceRate +
+                             totalKeyPresses +
+                             active +
+                             upright,
+                           random = ~ 1 | subject / week,
+                           data = dat_c2_no_tdia)
+
+m10.no_tdia.all.nlme <- dat_c2_no_tdia %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(update(m10.no_tdia.X1.nlme, 
+                                 reformulate(".", cur_column())))))
+```
+
+```{r}
+plot_validation(m10.no_tdia.all.nlme)
+```
+
+## 20 components
+
+```{r}
+dat_c3_no_tdia <- dats_c_no_tdia[[3]]
+
+m20.no_tdia.X1.nlme <- lme(X1 ~ medianIKD +
+                             percent95IKD +
+                             madIKD +
+                             autocorrectRate +
+                             backspaceRate +
+                             totalKeyPresses +
+                             active +
+                             upright,
+                           random = ~ 1 | subject / week,
+                           data = dat_c3_no_tdia)
+
+m20.no_tdia.all.nlme <- dat_c3_no_tdia %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(update(m20.no_tdia.X1.nlme, 
+                                 reformulate(".", cur_column())))))
+```
+
+```{r}
+plot_validation(m20.no_tdia.all.nlme)
 ```
