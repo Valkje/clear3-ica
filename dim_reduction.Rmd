@@ -31,9 +31,6 @@ setwd(wd)
 
 source("src/load_dependencies.R")
 library(fastICA)
-
-# Because it's required by the Lancet
-options(OutDec = "·")
 ```
 
 ```{r}
@@ -124,7 +121,7 @@ pca_res <- prcomp(test_dat[,2:ncol(test_dat)])
 pca_res
 ```
 
-```{r fig.height=8}
+```{r fig.height=10, fig.width=10}
 fviz_screeplot(pca_res)
 fviz_contrib(pca_res, choice = "var", axes = 1, top = 20)
 fviz_contrib(pca_res, choice = "var", axes = 2, top = 10)
@@ -1615,11 +1612,13 @@ run_icas <- function(dat_path, ns_comp, out_path = NULL, sub_norm = FALSE) {
   }
   
   if (!is.null(out_path))
-    save(icas, subs, dates, file = out_path)
+    save(icas, subs, dates, mat, means, file = out_path)
   
   icas
 }
+```
 
+```{r}
 icas <- run_icas(dat_path = file.path(dat_dir, "dat_reg_semi_contiguous.rds"),
                  ns_comp = c(5, 10, 20),
                  out_path = file.path(dat_dir, "dat_reg_contig_icas.rda"))
@@ -1762,6 +1761,7 @@ fancy_mix_fig <- function(ica, n_row = 1, lims = c(-0.5, 0.5), ann_x = NULL,
     xlim(lims[1], lims[2]) +
     xlab("Loading") +
     ylab("Variable") +
+    coord_cartesian(clip = "off") +
     theme(text = element_text(size = 22),
           axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
           # axis.text.y = element_blank(),
@@ -1809,27 +1809,16 @@ fancy_mix_fig <- function(ica, n_row = 1, lims = c(-0.5, 0.5), ann_x = NULL,
         data = pan_left_dat)
   }
   
-  # Code to override clipping
-  gt <- ggplotGrob(g)
-  gt$layout[grepl("panel", gt$layout$name), ]$clip <- "off"
-  
-  # Draw the plot
-  grid.newpage()
-  grid.draw(gt)
-  
   if (!is.null(save_path)) {
-    pdf(save_path, width = width, height = height)
-    
-    grid.newpage()
-    grid.draw(gt)
-    
-    dev.off()
+    ggsave(save_path, g, width = width, height = height)
   }
+  
+  g
 }
 ```
 
 ```{r fig.height=10, paged.print=FALSE}
-fancy_mix_fig(icas$`5`, file.path(man_img_dir, "mixing_matrix_5_test.pdf"))
+fancy_mix_fig(icas$`5`, save_path = file.path(man_img_dir, "mixing_matrix_5_test.pdf"))
 ```
 
 ```{r fig.height=10}
@@ -1965,6 +1954,163 @@ fancy_mix_fig(ica_frag[[3]],
               ann_x = -0.9,
               save_path = file.path(man_img_dir, "mixing_matrix_20_frag.pdf"),
               width = 15, height = 15)
+```
+
+### Reconstruction
+
+As one might expect, fully reconstructing the original data requires all 34 ICs.
+
+```{r}
+load(file.path(dat_dir, "dat_reg_frag_icas.rda"))
+dat_reg <- readRDS(file.path(dat_dir, "dat_reg_fragmented.rds"))
+
+dat_reg_sr <- dat_reg %>%
+  filter(modality == "self_report", !is.na(value)) %>%
+  select(!c(study_start_date, treatment_start_date, modality))
+
+reconstruct <- function(ica) {
+  recon <- ica$S %*% ica$A + matrix(rep(means, nrow(ica$S)), nrow = nrow(ica$S), byrow = TRUE)
+  
+  recon_df <- data.frame(recon) %>%
+    rename_with(function(x) mat_names) %>%
+    add_column(subject = subs, date = dates, .before = 1) %>%
+    pivot_longer(!c(subject, date), 
+                 names_to = "variable", values_to = "reconstructed") %>%
+    mutate(reconstructed = exp(reconstructed)) %>%
+    inner_join(dat_reg_sr, c("subject", "date", "variable")) %>%
+    rename(original = value) %>%
+    pivot_longer(c(reconstructed, original), names_to = "phase")
+  
+  recon_df
+}
+```
+
+```{r fig.height=10}
+recon_df <- reconstruct(icas[[1]])
+
+for (sub in unique(subs)) {
+  g <- ggplot(recon_df %>%
+           filter(subject == sub), aes(date, value)) +
+    geom_line(aes(color = phase)) +
+    facet_wrap(~ variable) +
+    labs(title = str_glue("Subject {sub}"))
+  
+  print(g)
+  
+  break
+}
+```
+
+```{r fig.height=10}
+recon_df <- reconstruct(icas[[3]])
+
+for (sub in unique(subs)) {
+  g <- ggplot(recon_df %>%
+           filter(subject == sub), aes(date, value)) +
+    geom_line(aes(color = phase)) +
+    facet_wrap(~ variable) +
+    labs(title = str_glue("Subject {sub}"))
+  
+  print(g)
+  
+  break
+}
+```
+
+```{r fig.height=10}
+ica_frag_full <- run_icas(file.path(dat_dir, "dat_reg_fragmented.rds"), 
+                          ns_comp = c(34))
+
+recon_df <- reconstruct(ica_frag_full[[1]])
+
+for (sub in unique(subs)) {
+  g <- ggplot(recon_df %>%
+           filter(subject == sub), aes(date, value)) +
+    geom_line(aes(color = phase)) +
+    facet_wrap(~ variable) +
+    labs(title = str_glue("Subject {sub}"))
+  
+  print(g)
+  
+  break
+}
+```
+
+### Cross-correlations
+
+ICA5 vs ICA10.
+
+```{r}
+S5 <- ica_frag[[1]]$S
+S10 <- ica_frag[[2]]$S
+
+t(cor(S5, S10))
+```
+
+I initially included stars to indicate (Bonferroni-corrected) significance, but eventually I felt that was overkill. If the reviewers complain, I can put them back in.
+
+```{r}
+n_col <- 5
+n_row <- 10
+
+cor_test_mat <- matrix(nrow = n_row, ncol = n_col)
+
+for (j in 1:n_col) {
+  for (i in 1:n_row) {
+    test_res <- cor.test(S5[,j], S10[,i])
+    cor_test_mat[i, j] <- test_res$p.value
+  }
+}
+
+cor_test_mat
+```
+
+
+```{r}
+cross_5_10 <- melt(cor(S5, S10)) %>%
+  rename(five = X1, ten = X2) %>%
+  mutate(across(five:ten, ~ fct_reorder(paste("IC", .x), .x))) %>%
+  add_column(p_val = as.vector(t(cor_test_mat))) %>%
+  mutate(
+    signif = case_when(p_val * length(p_val) < 0.05 ~ "*", TRUE ~ ""),
+    labels = paste0(round(value, 2), signif)
+  )
+
+ggplot(cross_5_10, aes(ten, five, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = round(value, 2)), color = "black") +
+  labs(x = "10-component solution", y = "5-component solution") +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       limits = c(-1, 1), name = "Correlation")
+
+ggsave(file.path(man_img_dir, "cross_cor_5_10.pdf"))
+```
+
+
+```{r}
+S20 <- ica_frag[[3]]$S
+
+t(cor(S5, S20))
+```
+
+```{r fig.height=4, fig.width=8}
+cross_5_20 <- melt(cor(S5, S20)) %>%
+  rename(five = X1, twenty = X2) %>%
+  mutate(across(five:twenty, ~ fct_reorder(paste("IC", .x), .x)))
+
+ggplot(cross_5_20, aes(twenty, five, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = round(value, 2)), angle = 90, size = 3, color = "black") +
+  labs(x = "20-component solution", y = "5-component solution") +
+  scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                       limits = c(-1, 1), name = "Correlation") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+ggsave(file.path(man_img_dir, "cross_cor_5_20.pdf"))
+```
+
+```{r}
+t(cor(S10, S20))
 ```
 
 
