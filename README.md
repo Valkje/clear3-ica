@@ -1,7 +1,15 @@
-# Understanding statistical properties of typing and EMA data
+# Data fusion through independent component analysis
 
-For preprocessing of the BiAffect typing data, take a look at `src/preproc_all.R`, which preprocesses all data and puts them into a BIDS-like format, and `src/preproc.R`, which contains the functions that `src/preproc_all.R` uses.
+Analysis source code accompanying the manuscript 'Smartphone keyboard dynamics predict affect in suicidal ideation'. For a high-level overview of the analysis pipeline, please refer to one of the `pipeline.*` files. Once downloaded and opened in a browser, `pipeline.nb.html` is the easiest to interpret; `pipeline.pdf` contains the same content but in a different format. `pipeline.Rmd` contains the corresponding source code.
 
-`src/load_dependencies.R` loads all the dependencies that any R code in this repository might need. If you only do preprocessing, you won't need all of them (e.g. you can easily comment out everything from `library(nlme)` to `library(rhdf5)`).
+## Set-up
 
-If you are worried about the relatively large portion of incomplete cases, you can check out `imputation.Rmd`. It is less streamlined than anything you will find in the `src` directory, but can generate imputations that make the application of e.g. mixed models more feasible. If you go down this route, be sure to check out Stef van Buuren's [book on multiple imputation](https://stefvanbuuren.name/fimd/) as well.
+Install R (we used version 4.2.2) and the dependencies listed in `src/load_dependencies.R`. When running R markdown files, make sure to change the working (`wd`), data (`dat_dir`), image (`man_img_dir`) and any other directory paths at the top of the file.
+
+## Code structure
+
+The analysis pipeline progresses through three main stages: Preprocessing, temporal independent component analysis (ICA), and linear mixed-effects modelling. The development of these stages has taken place within several different R markdown files, which are still present in the `dev` directory for archival purposes, but all relevant functions have been moved into the `src` directory and are being called from `pipeline.Rmd`.
+
+At some point, we created some visual aids to help us assess data quality and quantity and determine appropriate exclusion criteria. These aids have taken the form of a Shiny app, which can be found as `shiny/missingness/app.R`. Running this app will open a dashboard that allows you to play with certain exclusion thresholds (the default values are the settings that we have used for the manuscript). At the bottom of the page, you will find the option to save the resulting data set and some figures to files. File paths can be set within `app.R`.
+
+For the sensitivity analyses in the Supplement, we made use of a helper script that allowed us to cycle through all ICA solutions, called `src/sens_helper.R`.
