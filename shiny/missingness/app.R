@@ -137,7 +137,8 @@ ui <- fluidPage(
                     checkboxGroupInput("sel_cols",
                                        NULL,
                                        choices = choices,
-                                       selected = choices,
+                                       # We want to exclude TDIA measures by default for now
+                                       selected = choices[! choices %in% c("partition_idx", "mean_accuracy")],
                                        inline = FALSE),
                     style = "overflow: auto; height: 200px"
                   ),
@@ -185,7 +186,7 @@ ui <- fluidPage(
     column(3,
       numericInput("thr_contiguity",
                    "Contiguity threshold:",
-                    value = 7, min = 0, max = 1000) # We could make the max adaptive
+                    value = 0, min = 0, max = 1000) # We could make the max adaptive
     ),
     column(3,
       selectInput("present_op",
@@ -487,16 +488,21 @@ server <- function(input, output) {
       "self_report" = "Self-report"
     )
 
+    min_date <- min(na_pat_coll$date) - months(1)
+    # We need 0.5 month extra to prevent the tick mark from running off the
+    # margin
+    max_date <- max(na_pat_coll$date) + days(45)
+
     ggplot(na_pat_coll, aes(date, subject)) +
       geom_tile(aes(fill = present)) +
       geom_point(aes(color = good_block), size = 0.1) +
       scale_fill_manual(values = c("darkgrey", "steelblue"),
                         labels = c("Missing", "Present"), name = NULL) +
       scale_color_discrete(labels = c("Excluded", "Included"), name = NULL) +
-      xlim(dmy("01-01-2020"), dmy("01-02-2023")) +
+      xlim(min_date, max_date) +
       facet_wrap(~ modality, nrow = 1, labeller = as_labeller(facet_labels)) +
       xlab("Date") +
-      ylab("Subject") +
+      ylab("Participant number") +
       theme_minimal() +
       theme(text = element_text(size = 18),
             axis.text.y = element_text(size = 10),
@@ -515,9 +521,10 @@ server <- function(input, output) {
       )
 
     n_sub <- n_distinct(counts$subject)
+    min_date <- min(na_pat_coll$date)
 
     g <- miss_pat_plot() +
-      geom_label(x = ymd("2020-01-01"),
+      geom_label(x = min_date,
                  y = levels(counts$subject)[n_sub],
                  hjust = "left",
                  vjust = "top",
@@ -525,13 +532,13 @@ server <- function(input, output) {
                  data = counts %>%
                    group_by(modality) %>%
                    summarize(n = sum(n))) +
-      geom_text(aes(y = subject, label = n, x = max(max_date) + months(2)),
+      geom_text(aes(y = subject, label = n, x = max(max_date) + months(1)),
                 hjust = "right",
                 data = counts)
 
     if (n_sub > 1) {
       g <- g +
-        geom_label(x = ymd("2020-01-01"),
+        geom_label(x = min_date,
                    y = levels(counts$subject)[n_sub-3],
                    hjust = "left",
                    vjust = "top",
@@ -584,10 +591,10 @@ server <- function(input, output) {
         strip.text.x = element_text(size = 16)
       )
 
-    ggsave(file.path(man_img_dir, "miss_pat_fragmented.pdf"), g,
+    ggsave(file.path(man_img_dir, "miss_pat_fragmented_no-tdia.pdf"), g,
            width = 12, height = 12)
 
-    ggsave(file.path(man_img_dir, "miss_pat_fragmented.png"), g,
+    ggsave(file.path(man_img_dir, "miss_pat_fragmented_no-tdia.png"), g,
            width = 12, height = 12)
 
     message("Figure saved successfully.")
@@ -612,10 +619,10 @@ server <- function(input, output) {
       filter(good_block) %>%
       select(!good_block)
 
-    saveRDS(dat, file.path(dat_dir, "dat_reg_fragmented.rds"))
+    saveRDS(dat, file.path(dat_dir, "dat_reg_fragmented_no-tdia.rds"))
 
     # Missingness markers might be useful later on
-    saveRDS(na_pat_col, file.path(dat_dir, "missingness_fragmented.rds"))
+    saveRDS(na_pat_col, file.path(dat_dir, "missingness_fragmented_no-tdia.rds"))
 
     message("Data saved successfully.")
   })
