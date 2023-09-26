@@ -3,8 +3,8 @@ title: "R Notebook"
 output: html_notebook
 ---
 
-```{r setup}
-local <- FALSE
+```{r setup, echo=FALSE}
+local <- TRUE
 
 wd <- ""
 
@@ -14,7 +14,7 @@ if (!local) {
   # Base directory for the data set we will create
   dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
 } else {
-  wd <- "~/HPC/Documents/Autocorrelation"
+  wd <- "/Volumes/home/preclineu/lorkno/Documents/Autocorrelation"
   # Base directory for the data set we will create
   dat_dir <- "~/HPC_project/data"
 }
@@ -30,19 +30,6 @@ source("src/load_dependencies.R")
 ```{r}
 load(file.path(dat_dir, "dat_reg_tdia_30_blocked.rda"))
 ```
-
-DEPRECATED; Filter out subjects who don't have any TDIA measures (i.e. <30 days of data).
-
-```{r}
-# ls <- load_subject_key_data(dat_dir, load_kp = FALSE)
-# 
-# subjects <- ls$subjects
-# 
-# dat_reg <- dat_reg %>%
-#   filter(subject %in% subjects) %>%
-#   mutate(subject = droplevels(subject))
-```
-
 
 ```{r}
 max.print <- options("max.print")$max.print
