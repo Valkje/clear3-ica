@@ -24,64 +24,10 @@ if (!local) {
 # So that's why it's here instead of above.
 setwd(wd) 
 
+# For manuscript images
+man_img_dir <- file.path("~/Documents/Writing/Papers/Paper 1/images")
+
 source("src/load_dependencies.R")
-```
-
-# Alex's data
-
-```{r}
-dat <- read.table("data/2022-09-14 keystroke detail.psv", header = TRUE, sep = "|", comment.char = "")
-head(dat)
-```
-
-```{r}
-table(dat$keypress_type)
-```
-
-```{r}
-table(dat$sessionTimeZone)
-```
-
-```{r}
-hist(dat$sampleNumber)
-```
-
-```{r}
-length(unique(dat$sessionTimestamp))
-```
-
-```{r}
-dat %>%
-  mutate(date = as.POSIXct(sessionTimestamp, origin="1970-01-01", tz="Asia/Taipei")) %>%
-  group_by(sessionTimestamp) %>%
-  summarise(
-    duration = sessionDuration[1],
-    sumUnknown1 = sum(X.Unknown1., na.rm = TRUE),
-    sumUnknown2 = sum(X.Unknown2., na.rm = TRUE),
-    alphanum = sum(keypress_type == "alphanum") / n(),
-    autocorrect = sum(keypress_type == "autocorrection") / n(),
-    backspace = sum(keypress_type == "backspace") / n(),
-    date = date[1]
-  )
-```
-
-```{r}
-dat %>%
-  group_by(sessionTimestamp) %>%
-  group_modify(function (x, y) {
-    if (nrow(x) == 1) {
-      return(data.frame())
-    }
-    
-    sel <- 1:(nrow(x)-1) # Original selection
-    lagged_sel <- 2:nrow(x) # Lagged selection
-    x[sel,]$keypress_type <- paste(x[sel,]$keypress_type, x[lagged_sel,]$keypress_type, sep = "-")
-    x[sel,]
-  })
-```
-
-```{r}
-dat
 ```
 
 # BiAffect data
@@ -132,6 +78,15 @@ all_rep_dat <- zap_labels(all_rep_dat)
 all_rep_dat
 ```
 
+Write sleep data.
+
+```{r}
+write_csv(all_rep_dat %>%
+            select(id, daterated, sleepdur_yest, SleepLNQuality),
+          file = file.path(dat_dir, "clear3daily_20221205_sleep.csv"))
+```
+
+
 ```{r}
 table(all_rep_dat$id)
 ```
@@ -181,24 +136,6 @@ options(max.print = max.print)
 
 ```{r}
 complete.cases(red_rep_dat)
-```
-
-
-## Examining subject 3009
-
-```{r}
-sub_path <- "data/sub-3009/raw"
-
-raw_kp <- read.csv(file.path(sub_path, "User_3009_keypressDataMetrics.csv"))
-raw_acc <- read.csv(file.path(sub_path, "User_3009_accelData.csv"))
-```
-
-```{r}
-raw_kp
-```
-
-```{r}
-raw_acc
 ```
 
 
@@ -345,89 +282,6 @@ ggpairs(dat_ent %>% select(!c(year, week)),
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 
 # ggsave("images/splom.png", width = 1920, height = 1080, dpi = 120, unit = "px")
-```
-
-# Self-report data
-
-```{r}
-rep_file <- "../CLEAR3_Biaffect_Leow/Archived Versions/2022-02-15 - Updated Daily Dataset for Elena and Alex/20220215_clear3daily.csv"
-dat_rep <- read.csv(rep_file)
-head(dat_rep)
-```
-
-For now, only look at the self-report data of our subject of the key press data.
-
-```{r}
-dat_rep <- dat_rep %>%
-  filter(id == dat_kp$userID[1]) %>%
-  mutate(daterated = as.Date(daterated, format = "%m/%d/%Y"))
-
-dat_rep
-```
-
-Join with the key press session and entropy data:
-
-```{r}
-dat_rep_ent <- dat_rep %>%
-  group_by(
-    year = year(daterated),
-    week = week(daterated)
-  ) %>%
-  summarize(
-    menstrualbleeding = mean(menstrualbleeding, na.rm = T),
-    numdrinks_yest = mean(numdrinks_yest, na.rm = T),
-    workday = mean(workday, na.rm = T),
-    sleepdur_yest = mean(sleepdur_yest, na.rm = T),
-    physicaltension = mean(physicaltension, na.rm = T),
-    wishsleep = mean(wishsleep, na.rm = T),
-    MJuse = mean(MJuse, na.rm = T),
-    irritability_mean = mean(irritability_mean, na.rm = T)
-  ) %>%
-  left_join(dat_ent, by = c("year", "week")) %>%
-  ungroup()
-```
-
-```{r fig.height=8}
-ggplot(dat_rep, aes(x = daterated)) + 
-  geom_line(aes(y = irritability_mean, color = KL_divergence, group = 1), size = 1.05) +
-  geom_point(aes(y = firstdayofperiod)) + 
-  scale_x_date(labels = date_format("%Y-%m"), limits = c(min(dat_rep$daterated), as.Date("2021-07-11"))) + 
-  scale_color_gradientn(colors = hcl.colors(256, palette = "viridis")) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-```
-
-```{r}
-stress_cols <- na.omit(str_extract(colnames(dat_rep), "^stress.*"))
-ggplot(dat_rep %>%
-    pivot_longer(all_of(stress_cols), names_to = "stress")) +
-  geom_point(aes(x = daterated, y = value, color = stress)) + 
-  scale_x_date(labels = date_format("%Y-%m"), limits = c(min(dat_rep$daterated), as.Date("2021-04-01"))) + 
-  scale_fill_manual(values = hcl.colors(15)) +
-  ylim(0, 1.1) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-```
-
-Anything that can predict divergence? Time for a SPLOM (scatter plot matrix).
-
-```{r fig.height=10, warning=FALSE}
-# menstrualbleeding, 
-# numdrinks_yest, 
-# workday, 
-# sleepdur_yest, 
-# physicaltension, 
-# wishsleep, 
-# MJuse, 
-# irritability_mean,
-# entropy,
-# KL_divergence
-
-
-ggpairs(dat_rep_ent %>% 
-          select(!c(year, week)),
-  progress = FALSE) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-
-# save_and_plot(h, "images/splom_self_rep.png", res = 120)
 ```
 
 # Examine all subjects data
@@ -871,4 +725,254 @@ ggplot(na_s, aes(date)) +
   scale_fill_manual(values = c("grey", "steelblue")) +
   facet_wrap(~ subject, scales = "free_x")
 ```
+
+# IC 3 vs participant means
+
+`prep_reg_dat` can be found in `multilevel_modelling.Rmd`.
+
+```{r}
+ls <- prep_reg_dat(
+  dat_path = file.path(dat_dir, "dat_reg_fragmented_no-tdia.rds"),
+  ica_path = file.path(dat_dir, "dat_reg_frag_icas.rda")
+)
+
+dat_reg_no_tdia <- ls$dat_reg
+dat_bi <- ls$dat_bi
+dat_sr <- ls$dat_sr
+icas <- ls$icas
+subs <- ls$subs
+dates <- ls$dates
+dat_c <- ls$dats_c[[1]]
+```
+
+```{r}
+ic_df <- data.frame(icas[[1]]$S) %>%
+  add_column(subject = subs, date = dates)
+
+dat_ica_sr <- dat_reg_no_tdia %>%
+  filter(modality == "self_report") %>%
+  pivot_wider(names_from = variable, values_from = value) %>%
+  inner_join(ic_df, by = c("subject", "date"))
+
+dat_ica_sr
+```
+
+```{r}
+all_means <- dat_ica_sr %>%
+  group_by(subject) %>%
+  summarize(across(c(ASIQ9_wishdead:mastery, X3), mean)) %>%
+  rowwise(subject, X3) %>%
+  summarize(mean = mean(c_across(ASIQ9_wishdead:mastery)))
+
+all_means
+```
+
+```{r}
+ggplot(all_means, aes(X3, mean)) +
+  geom_point()
+```
+
+```{r}
+cor.test(all_means$X3, all_means$mean)
+```
+
+```{r}
+time_mean <- dat_ica_sr %>%
+  rowwise(subject, date, X3) %>%
+  summarize(self_report = mean(c_across(ASIQ9_wishdead:mastery))) %>%
+  pivot_longer(c(X3, self_report), names_to = "modality")
+
+time_mean
+```
+
+```{r fig.height=10}
+ggplot(time_mean, aes(date, value, color = modality)) +
+  geom_line() +
+  labs(x = "Date", y = "Value", color = "Modality") +
+  scale_x_date(breaks = NULL) +
+  scale_color_hue(labels = c("Mean self-report rating", "Independent component 3")) +
+  facet_wrap(~ subject, scales = "free_x") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 8))
+```
+
+All in all, it is quite clear that IC 3 corresponds to the inverted mean item rating for several subjects.
+
+```{r}
+ggplot(time_mean %>% filter(subject == "3083"), aes(date, value, color = modality)) +
+  geom_line(lwd = 1) +
+  scale_color_manual(values = c("lightcoral", "turquoise4"),
+                     labels = c("Mean self-report rating", "Independent component 3")) +
+  labs(x = "Date", y = "Value", color = "Modality") +
+  theme_minimal()
+
+ggsave(file.path(man_img_dir, "ic3_timecourse.pdf"))
+```
+
+```{r}
+n_distinct(filter(time_mean, subject == "3083")$date)
+```
+
+# Key press bubble plot
+
+```{r}
+ls <- load_subject_key_data(dat_dir)
+dats_kp <- ls$dats_kp
+dats_ses <- ls$dats_ses
+subjects <- ls$subjects
+```
+
+```{r}
+sizes <- sapply(dats_ses, nrow)
+
+dat_ses <- dats_ses[sizes == max(sizes)][[1]]
+```
+
+```{r}
+dat_ses %>%
+  group_by(date) %>%
+  summarize(n = n())
+```
+
+```{r}
+hist(1 / (dat_ses$medianIKD[dat_ses$medianIKD < 0.5]))
+```
+
+
+```{r fig.height=10}
+reverse2_trans <- function() {
+  trans_new(
+    "reverse2",
+    function(x) as.Date(-1 * as.numeric(x), ymd("1970-01-01")), # Force values to be numeric for Date objects
+    function(x) as.Date(-1 * as.numeric(x), ymd("1970-01-01"))
+  )
+}
+
+ggplot(dat_ses %>%
+         filter(date > ymd("2020-12-31"), date < ymd("2021-12-31")), 
+       aes(hour, date, size = totalKeyPresses, color = medianIKD)) +
+  geom_point() +
+  xlab("Hour") +
+  ylab("Date") +
+  scale_y_continuous(
+    trans = c("date", "reverse2")
+  ) +
+  scale_size_continuous("Number of key presses") +
+  scale_color_viridis_c("Delay between keys (s)", limits = c(0, 0.5)) +
+  theme(text = element_text(size = 18))
+```
+
+```{r}
+ggplot(dat_ses %>%
+         group_by(hour) %>%
+         summarize(
+           sd = sd(medianIKD, na.rm = TRUE),
+           medianIKD = mean(medianIKD, na.rm = TRUE)
+         ), 
+       aes(hour, medianIKD)) +
+  geom_line(group = 1) +
+  geom_errorbar(aes(ymin = medianIKD - sd, ymax = medianIKD + sd))
+```
+
+```{r}
+load(file.path(dat_dir, "sub-3009/preproc/sub-3009_preprocessed.rda"))
+```
+
+```{r}
+acc_path <- file.path(dat_dir, "sub-3009/raw/sub-3009_accelerometer.psv")
+raw_acc <- read.table(acc_path, header = TRUE, sep = "|", strip.white = TRUE, fill = TRUE)
+
+dat_acc <- raw_acc %>%
+  mutate(
+    # Timezone is coded as number of hours deviating from UCT times 100
+    # (e.g. -600), so multiply by 36 to get offset in seconds.
+    sessionTimestampLocal = as_datetime(sessionTimestamp + createdOnTimeZone * 36),
+    sessionNumber = cumsum(sampleNumber == 1)
+  ) %>%
+  rename(x = xCoord, y = yCoord, z = zCoord)
+```
+
+```{r}
+saveRDS(dat_acc, file.path(dat_dir, "sub-3009/preproc/sub-3009_semi-raw-dat-acc.rds"))
+```
+
+
+ymd("2021-02-28")
+
+```{r}
+timestamps_kp <- dat_kp %>%
+  select(c(keypressTimestampLocal)) %>%
+  rename(timestamp = keypressTimestampLocal) %>%
+  add_column(modality = "Keyboard") %>%
+  filter(date(timestamp) == ymd("2021-02-28"))
+
+timestamps_acc <- dat_acc %>%
+  filter(date(sessionTimestampLocal) == ymd("2021-02-28")) %>%
+  mutate(timestamp = sessionTimestampLocal + seconds((sampleNumber - 1) * 0.1)) %>%
+  select(c(timestamp)) %>%
+  add_column(modality = "Accelerometer")
+
+timestamps_sr <- data.frame(timestamp = parse_date_time("2021-02-28 19:30:15", "Y-m-d H:M:S"),
+                            modality = "Self-report")
+
+timestamps <- bind_rows(timestamps_kp, timestamps_acc, timestamps_sr) %>%
+  filter(timestamp >= parse_date_time("2021-02-28 19:30", "Y-m-d H:M"),
+         timestamp < parse_date_time("2021-02-28 19:33", "Y-m-d H:M"))
+```
+
+```{r fig.height=10, fig.width=10}
+ggplot(timestamps, aes(timestamp, modality)) +
+  geom_point(aes(color = modality), size = 3) +
+  labs(x = "Time (seconds)", y = "Modality") +
+  guides(color = guide_legend("Modality", reverse = TRUE)) +
+  theme_minimal() +
+  theme(text = element_text(size = 15))
+```
+
+```{r}
+timestamps_kp <- dat_kp %>%
+  select(c(keypressTimestampLocal)) %>%
+  rename(timestamp = keypressTimestampLocal) %>%
+  add_column(modality = "Keyboard") %>%
+  filter(date(timestamp) >= ymd("2021-02-25"), date(timestamp) <= ymd("2021-02-28"))
+
+timestamps_acc <- dat_acc %>%
+  filter(date(sessionTimestampLocal) >= ymd("2021-02-25"), date(sessionTimestampLocal) <= ymd("2021-02-28")) %>%
+  mutate(timestamp = sessionTimestampLocal + seconds((sampleNumber - 1) * 0.1)) %>%
+  select(c(timestamp)) %>%
+  add_column(modality = "Accelerometer")
+
+dates <- unique(date(timestamps_kp$timestamp))
+timestamps_sr <- data.frame(timestamp = dates + hours(19),
+                            modality = "Self-report")
+
+timestamps <- bind_rows(timestamps_kp, timestamps_acc, timestamps_sr)
+```
+
+```{r fig.height=10, fig.width=10}
+ggplot(timestamps, aes(timestamp, modality)) +
+  geom_point(aes(color = modality), size = 3) +
+  labs(x = "Time", y = "Modality") +
+  guides(color = "none") +
+  theme_minimal() +
+  theme(text = element_text(size = 15))
+```
+
+```{r fig.height=10, fig.width=10}
+df <- data.frame(
+  timestamp = rep(c(ymd("2021-02-25"), 
+                    ymd("2021-02-26"), 
+                    ymd("2021-02-27"), 
+                    ymd("2021-02-28")), 
+                  3),
+  modality = rep(c("Accelerometer", "Keyboard", "Self-report"), each = 4)
+)
+
+ggplot(df, aes(timestamp, modality)) +
+  geom_point(aes(color = modality), size = 3) +
+  labs(x = "Time", y = "Modality") +
+  guides(color = "none") +
+  theme_minimal() +
+  theme(text = element_text(size = 15))
+```
+
 
