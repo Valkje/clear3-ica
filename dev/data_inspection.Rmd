@@ -1,0 +1,978 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+local <- TRUE
+
+wd <- ""
+
+if (!local) {
+  # Cluster environment
+  wd <- "~/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
+} else {
+  wd <- "/Volumes/home/preclineu/lorkno/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "~/HPC_project/data"
+}
+
+# For some reason this sets the pwd only for the current scope, which means it 
+# does not affect anything outside an if block if you set it there.
+# So that's why it's here instead of above.
+setwd(wd) 
+
+# For manuscript images
+man_img_dir <- file.path("~/Documents/Writing/Papers/Paper 1/images")
+
+source("src/load_dependencies.R")
+```
+
+# BiAffect data
+
+```{r}
+dats_ses[[1]]
+```
+
+```{r}
+dats_kp[[1]]
+```
+
+
+```{r}
+names(dats_ses) <- subjects
+biaffect_cors <- bind_rows(dats_ses, .id = "subject") %>%
+  mutate(week = week(date)) %>%
+  group_by(subject, week) %>%
+  select(medianIKD:backspaceRate, totalKeyPresses:bed) %>%
+  nest() %>%
+  mutate(
+    cor_mat = list(cor(data[[1]]))
+  )
+
+biaffect_cors
+```
+
+```{r}
+melt(biaffect_cors$cor_mat[[1]])
+```
+
+
+```{r}
+ggplot(melt(biaffect_cors$cor_mat[[102]]), aes(X2, X1)) +
+  geom_raster(aes(fill = value)) +
+  scale_y_discrete(limits = rev) +
+  scale_fill_gradient2(low = muted("blue"), high = muted("red"), mid = "white", 
+                       limits = c(-1, 1)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+
+# Perimenstrual suicidality data
+
+```{r}
+all_rep_dat <- read_sav(file.path(dat_dir, "clear3daily_20221205.sav"))
+all_rep_dat <- zap_labels(all_rep_dat)
+all_rep_dat
+```
+
+Write sleep data.
+
+```{r}
+write_csv(all_rep_dat %>%
+            select(id, daterated, sleepdur_yest, SleepLNQuality),
+          file = file.path(dat_dir, "clear3daily_20221205_sleep.csv"))
+```
+
+
+```{r}
+table(all_rep_dat$id)
+```
+
+```{r warning=FALSE}
+max.print <- options("max.print")$max.print
+options(max.print = 10 * max.print)
+
+tab1 <- CreateTableOne(data = all_rep_dat)
+print(summary(tab1))
+
+options(max.print = max.print)
+```
+
+As for the 05-12-2022 snapshot of the data set, we see many spurious days for a couple of subjects (with `daterated` already starting in 1990). Those days contain no actual data, we will simply throw them out of the data set. First select only the columns with relevant data:
+
+```{r}
+inclusion <- read_excel("regression_inclusion_20221205.xlsx")$Included
+inclusion <- inclusion[1:ncol(all_rep_dat)]
+# Relevant self-report data
+rel_rep_dat <- all_rep_dat[inclusion == 1]
+rel_rep_dat
+```
+
+
+```{r}
+all_missing <- data.frame(is.na(rel_rep_dat)) %>%
+  rowwise() %>%
+  summarize(allMissing = all(c_across(menstrualbleeding:panicattack)))
+
+# Reduced self-report data
+red_rep_dat <- rel_rep_dat[!all_missing$allMissing,]
+red_rep_dat
+```
+
+A reduction of about 22,000 rows. Let's see what TableOne has to say about the data now. But first we throw out the text responses.
+
+```{r warning=FALSE}
+max.print <- options("max.print")$max.print
+options(max.print = 10 * max.print)
+
+tab1 <- CreateTableOne(data = red_rep_dat)
+print(summary(tab1))
+
+options(max.print = max.print)
+```
+
+```{r}
+complete.cases(red_rep_dat)
+```
+
+
+## Handling PSV files
+
+```{r}
+dat_dir <- "data"
+
+labels = c("distanceFromCenter", "distanceFromPrevious")
+
+path <- "../CLEAR/Clear lab participants keystroke dynamics data/***REMOVED*** keystroke dynamics data.psv"
+
+sub <- str_match(path, "\\+([0-9]+)")[,2]
+
+intendend_n_pipes <- 14
+
+lin <- read_lines(path)
+actual_n_pipes <- str_count(lin[1], "\\|")
+
+sel <- (length(labels) + 1 - (intendend_n_pipes - actual_n_pipes)):length(labels)
+new_labels <- paste(labels[sel], collapse = "|")
+
+if (new_labels != "") 
+  lin[1] <- paste(lin[1], new_labels, sep = "|")
+
+sub_dir <- str_glue("sub-{sub}")
+raw_dir <- file.path(dat_dir, sub_dir, "raw")
+dir.create(raw_dir, showWarnings = FALSE, recursive = TRUE)
+
+sub_kp_file <- file.path(raw_dir, str_glue("sub-{sub}_keystrokes.psv"))
+write_lines(lin, sub_kp_file)
+```
+
+```{r}
+raw_kp <- read.table(sub_kp_file, header = TRUE, sep = "|", strip.white = TRUE, fill = TRUE)
+raw_kp
+```
+
+Things to do for the key press data:
+
+* Convert sessionTimestamp to sessionTimestampLocal. (Note: sessionTimeZone says it's zero, but I don't believe that. Looking, for instance, at the frequency of key strokes over time, it is clear that all timestamps shoud be shifted by createdOnTimeZone instead of sessionTimeZone.)
+* Calculate IKD from timestamp.
+* Convert timestamp to keypressTimestampLocal.
+* Convert sampleNumber to sessionNumber.
+* Calculate previousKeyType.
+
+```{r}
+raw_kp %>%
+  mutate(
+    sessionTimestampLocal = as_datetime(sessionTimestamp + createdOnTimeZone * 36),
+    keypressTimestampLocal = as_datetime(timestamp + createdOnTimeZone * 36),
+    IKD = c(NA, diff(timestamp)),
+    previousKeyType = lag(keypress_type),
+    sessionNumber = cumsum(sampleNumber == 1)
+  ) %>%
+  select(!c(sessionTimestamp, sessionTimeZone, sampleNumber))
+```
+
+```{r}
+dt <- as_datetime(raw_kp$sessionTimestamp)
+
+hist((hour(dt) - 6) %% 24)
+```
+
+
+```{r}
+raw_acc <- read.table("../CLEAR/Clear lab participants keyboard accelerometer kinematics data/***REMOVED*** keyboard accelerometer kinematics data.psv", header = TRUE, sep = "|", strip.white = TRUE, fill = TRUE)
+raw_acc
+```
+
+Things to do for the accelerometer data:
+
+* Convert sessionTimestamp to sessionTimestampLocal. (Note: sessionTimeZone says it's zero, but I don't believe that. Looking, for instance, at the frequency of key strokes over time, it is clear that all timestamps shoud be shifted by createdOnTimeZone instead of sessionTimeZone.)
+* Convert sampleNumber to sessionNumber.
+* Rename [x,y,z]Coord to [x,y,z].
+
+```{r}
+raw_acc %>%
+  mutate(
+    sessionTimestampLocal = as_datetime(sessionTimestamp + createdOnTimeZone * 36),
+    sessionNumber = cumsum(sampleNumber == 1)
+  ) %>%
+  rename(x = xCoord, y = yCoord, z = zCoord) %>%
+  select(!c(sessionTimestamp, sessionTimeZone, sampleNumber))
+```
+
+
+## Trying out pre-processing
+
+
+```{r}
+dat_acc <- preproc_acc(raw_acc, verbose = TRUE)
+
+dats <- preproc_kp(raw_kp, dat_acc, verbose = TRUE)
+dat_kp <- dats$dat_kp
+dat_ses <- dats$dat_ses
+```
+
+
+```{r}
+load("data/sub-3009/preproc/sub-3009_preprocessed.rda")
+```
+
+```{r}
+dat_kp_alphanum <- dat_kp %>%
+    filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+```
+
+Aggregating per hour:
+
+```{r}
+dat_hour <- dat_ses %>%
+  group_by(date, hour) %>%
+  summarize(
+    totalKeyPresses = sum(totalKeyPresses),
+    active = sum(active) / n(),
+    upright = sum(upright) / n(),
+    bed = sum(bed) / n()
+  )
+
+head(dat_hour)
+```
+
+```{r fig.height=8, fig.width=20}
+ggplot(dat_hour %>% pivot_longer(c(active, upright), names_to = "modality", values_to = "proportion")) +
+  geom_point(aes(hour, date, color = proportion, size = totalKeyPresses)) +
+  facet_grid(cols = vars(modality)) +
+  scale_color_gradientn(colors = hcl.colors(256)) +
+  theme_light() + 
+  theme(text = element_text(size = 18), panel.border = element_blank())
+
+# ggsave("images/typing_pattern.png", width = 1920, height = 1080, units = "px", dpi = 110)
+
+ggplot(dat_hour) +
+  geom_point(aes(hour, date, color = bed, size = totalKeyPresses)) +
+  scale_color_gradientn(colors = rev(hcl.colors(256))) +
+  theme_light() + 
+  theme(text = element_text(size = 18), panel.border = element_blank())
+```
+
+```{r fig.height=9}
+ggpairs(dat_ent %>% select(!c(year, week)), 
+        progress = FALSE) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+# ggsave("images/splom.png", width = 1920, height = 1080, dpi = 120, unit = "px")
+```
+
+# Examine all subjects data
+
+Determine data missingness, number of days, etc.
+
+```{r}
+dirs <- list.dirs(dat_dir)
+
+pattern <- "sub-([0-9]+)/preproc$"
+preproc_paths <- str_subset(dirs, pattern)
+subjects <- as.integer(str_match(preproc_paths, pattern)[,2])
+
+n_sub <- length(subjects)
+dats_acc <- vector("list", n_sub)
+dats_kp <- vector("list", n_sub)
+dats_ses <- vector("list", n_sub)
+```
+
+First load all relevant data. This might take a while.
+
+```{r}
+for (i in 1:length(subjects)) {
+  sub <- subjects[i]
+  
+  print(str_glue("Loading subject {sub}..."))
+  
+  preproc_path <- preproc_paths[i]
+  load(file.path(preproc_path, str_glue("sub-{sub}_preprocessed.rda")))
+  
+  dats_acc[[i]] <- dat_acc
+  dats_kp[[i]] <- dat_kp
+  dats_ses[[i]] <- dat_ses
+}
+```
+
+Save lists separately, using high compression. Hopefully that will reduce loading overhead next time.
+
+```{r}
+save(dats_acc, file = file.path(dat_dir, "dats_acc.rda"), compress = "xz")
+save(dats_kp, file = file.path(dat_dir, "dats_kp.rda"), compress = "xz")
+save(dats_ses, file = file.path(dat_dir, "dats_ses.rda"), compress = "xz")
+```
+
+```{r}
+load(file.path(dat_dir, "dats_kp.rda"))
+load(file.path(dat_dir, "dats_ses.rda"))
+```
+
+
+```{r}
+diagnostics <- data.frame(subject = subjects, 
+                          n_days = vector("integer", length(subjects)))
+
+for (i in 1:length(subjects)) {
+  diagnostics[i,]$n_days <- n_distinct(dats_ses[[i]]$date)
+}
+
+diagnostics
+```
+
+```{r}
+hist(diagnostics$n_days, main = "Histogram of number of key press data days per subject",
+     xlab = "Number of days of data per subject")
+```
+
+```{r}
+all_rep_dat <- read_sav(file.path(dat_dir, "clear3daily_20220801.sav"))
+all_rep_dat <- zap_labels(all_rep_dat)
+all_rep_dat
+```
+
+```{r}
+nan_summary <- all_rep_dat %>%
+  group_by(id) %>%
+  summarize(
+    n_days = n(),
+    across(menstrualbleeding:LHgroup_perimenstrual_count, ~ mean(is.na(.x)), .names = "{.col}NA")
+  )
+
+nan_summary
+```
+
+```{r fig.height=20}
+par(mfrow = c(10, ceiling(ncol(nan_summary) / 10)))
+
+for (i in 2:ncol(nan_summary)) {
+  hist(nan_summary[[i]], main = colnames(nan_summary)[i])
+}
+```
+
+```{r}
+hist(nan_summary[[2]])
+```
+
+```{r}
+all_rep_dat %>%
+  group_by(id) %>%
+  summarize(
+    n_days = n(),
+    na_cases = n() - complete.cases(cur_data())
+  )
+```
+
+
+
+# Subject 2D histogram correlation matrices
+
+```{r}
+ls <- get_partitions(dat_dir, date)
+subjects <- ls$dat$subjects
+dats_kp <- ls$dat$dats_kp
+dats_ses <- ls$dat$dats_ses
+subject_mats <- ls$subject_mats
+```
+
+```{r}
+save(subject_mats, file = file.path(dat_dir, "subject_mats.rda"))
+```
+
+```{r fig.height=10}
+n_sub <- length(subjects)
+
+for (i in 1:n_sub) {
+  cors <- cor(sapply(subject_mats[[i]], as.vector))
+  g1 <- ggplot(melt(cors), aes(X1, X2)) +
+    geom_raster(aes(fill = value)) + 
+    scale_y_reverse() +
+    ggtitle(str_glue("Subject {subjects[i]}"))
+  
+  df <- data.frame(mean_cor = colMeans(cors), X1 = 1:ncol(cors))
+  g2 <- ggplot(df, aes(X1, mean_cor)) +
+    geom_line() +
+    geom_point() +
+    ylim(0, 1) +
+    scale_x_continuous(breaks = seq(0, ncol(cors), 10), 
+                       minor_breaks = 1:ncol(cors)) +
+    ylab("Mean correlation")
+  
+  acfs <- apply(cors, 1, acf, lag.max = 300, plot = FALSE)
+  df <- melt(t(sapply(acfs, function(x) x$acf)))
+  g3 <- ggplot(df, aes(X2, value)) +
+    geom_point(alpha = 0.2) +
+    scale_x_continuous(breaks = seq(0, ncol(cors), 10), 
+                       minor_breaks = 1:ncol(cors)) +
+    xlab("X1") +
+    ylab("Autocorrelation")
+  
+  g <- ggarrange(g1, g2, g3, nrow = 3, common.legend = TRUE)
+  
+  print(g)
+  
+  ggsave(str_glue("images/autocorrelation/correlations/sub-{subjects[i]}_cor-mat_autocor.png"))
+}
+```
+
+```{r}
+cors <- cor(sapply(subject_mats[[which(subjects == "3083")]], as.vector))
+ggplot(melt(cors), aes(X1, X2)) +
+  geom_raster(aes(fill = value)) + 
+  scale_y_reverse() +
+  ggtitle(str_glue("Subject 3083")) +
+  labs(fill = "Correlation")
+
+ggsave("images/autocorrelation/correlations/sub-3083_cor_mat.png")
+```
+
+# `active` and `totalKeyPresses` histograms
+
+```{r}
+active <- lapply(dats_ses, function(df) df$active)
+totalKeyPresses <- lapply(dats_ses, function(df) df$totalKeyPresses)
+
+ls <- bin2d(unlist(active), unlist(totalKeyPresses), xBins = 2, yBins = 100)
+```
+
+```{r}
+ses_hists <- lapply(dats_ses, function(df) {
+  df <- df %>%
+    group_by(date) %>%
+    nest() %>%
+    mutate(
+      hist = map(data, function(df) {
+        binCounts(df$active, 
+                  df$totalKeyPresses, 
+                  ls$xBreaks, 
+                  ls$yBreaks)
+      })
+    )
+  
+  df$hist
+})
+```
+
+```{r}
+ls$counts
+```
+
+
+```{r}
+counts <- ls$counts %>%
+  rownames_to_column("X1") %>%
+  melt(id.vars = "X1", variable_name = c("X2")) %>%
+  mutate(
+    # X1 = case_when(
+    #   X1 == "0.245" ~ 0,
+    #   TRUE ~ 1
+    # ),
+    X1 = as.double(X1),
+    X2 = as.double(as.character(X2))
+  )
+  
+ggplot(counts, aes(X1, X2)) +
+  geom_raster(aes(fill = log(value))) +
+  scale_x_continuous(breaks = c(0.25, 0.75), labels = c("FALSE", "TRUE")) +
+  ylab("totalKeyPresses") +
+  xlab("active")
+```
+
+```{r}
+df <- dats_ses[[1]] %>%
+  group_by(date) %>%
+  nest() %>%
+  mutate(
+    numberOfSessions = nrow(data[[1]]),
+    hist = map(data, function(df) {
+      binCounts(df$active, 
+                df$totalKeyPresses, 
+                ls$xBreaks, 
+                ls$yBreaks)
+    })
+  )
+
+df
+```
+
+```{r}
+df[2,2][[1]]
+```
+
+```{r}
+ses_hists[[1]][[2]]
+```
+
+
+```{r}
+lapply(ses_hists[[1]], function(h) {
+  ggplot(melt(h), aes(X2, X1)) +
+    geom_raster(aes(fill = value))
+})
+```
+
+## Bind to 'standard' subject histograms
+
+```{r}
+bound_mats <- map2(subject_mats, ses_hists, map2, rbind)
+```
+
+```{r}
+ggplot(melt(bound_mats[[1]][[1]]), aes(X1, X2)) +
+  geom_raster(aes(fill = log(value)))
+```
+
+```{r}
+save(bound_mats, file = file.path(dat_dir, "bound_mats.rda"))
+```
+
+
+# Confusion matrix of TDIA calculation
+
+```{r}
+ls <- parse_tdia_jld(file.path(dat_dir, "tdias_weekly_mats.jld"))
+conf_mat <- ls$conf_mat
+```
+
+```{r fig.height=8}
+# Something to be aware of: X2 indicates the column number, not the row number
+ggplot(melt(conf_mat), aes(X2, X1)) +
+  geom_raster(aes(fill = value)) + 
+  scale_y_reverse() +
+  scale_fill_viridis_c() +
+  xlab("Predicted subject") +
+  ylab("Actual subject") +
+  labs(fill = "Count")
+
+# ggsave("images/test_tdia/confusion_matrix.png")
+
+ggplot(melt(conf_mat), aes(X2, X1)) +
+  geom_raster(aes(fill = log(value))) + 
+  scale_y_reverse()
+```
+
+```{r fig.height=8}
+b <- barplot(colSums(conf_mat))
+axis(1, b, labels = 1:ncol(conf_mat))
+```
+
+## Find out what sets apart the attractors
+
+I.e. subjects 5, 23, 38, 39, and 47. First plot data quantity over subjects:
+
+```{r}
+dats_kp_alphanum_lens <- lapply(dats_kp, function (dat_kp) {
+    nrow(filter(dat_kp, 
+                keypress_type == "alphanum", previousKeyType == "alphanum"))
+  })
+dats_kp_alphanum_lens <- unlist(dats_kp_alphanum_lens)
+```
+
+```{r}
+tdias_julia_30_blocked_summ <- summarize_tdias(file.path(
+                                                 dat_dir, 
+                                                 "tdias_flattened.jld"
+                                               ), 
+                                               n_parts = 30, julia = TRUE)
+
+g_tdia_sub <- plot_tdia_summ(tdias_julia_30_blocked_summ, print_plots = FALSE)[[2]] +
+  theme(text = element_text(size = 14))
+```
+
+```{r}
+g_tdia_sub
+```
+
+
+```{r fig.height=8}
+# par(mfrow = c(2, 1))
+# 
+# b <- barplot(colSums(conf_mat))
+# axis(1, b, labels = 1:ncol(conf_mat))
+# 
+# b <- barplot(dats_kp_alphanum_lens)
+# axis(1, b, labels = 1:length(dats_kp_alphanum_lens))
+
+df_conf <- data.frame(subject = 1:ncol(conf_mat), column_count = colSums(conf_mat))
+g1 <- ggplot(df_conf, aes(subject, column_count)) +
+  geom_col() +
+  theme(text = element_text(size=14))
+
+df_kp <- data.frame(subject = 1:ncol(conf_mat), keystroke_count = dats_kp_alphanum_lens)
+g2 <- ggplot(df_kp, aes(subject, keystroke_count)) +
+  geom_col() +
+  theme(text = element_text(size=14))
+
+ggarrange(g1, g2, g_tdia_sub, nrow = 3, align = "hv")
+
+ggsave("images/test_tdia/confusion_matrix_comparison.png")
+```
+
+# Cutting away non-baseline data
+
+```{r}
+load(file.path(dat_dir, "dat_reg_tdia_30_blocked_expanded_two-handed.rda"))
+```
+
+```{r}
+start_dates <- read_excel(
+  file.path(dat_dir, "CLEAR3_Biaffect_Leow/Metadata/clear3_start_tx_dates.xlsx")) %>%
+  mutate(
+    ID = as.character(ID),
+    study_start_date = as_date(study_start_date),
+    treatment_start_date = as_date(treatment_start_date)
+  )
+
+start_dates
+```
+
+## Regression data
+
+Join start dates with `dat_reg`, then filter out any rows with a date below `study_start_date` and above `treatment_start_date` (if they are present).
+
+```{r}
+dat_reg_trimmed <- dat_reg %>%
+  left_join(start_dates, c("subject" = "ID")) %>%
+  relocate(study_start_date, treatment_start_date, .after = date) %>%
+  filter(date >= study_start_date, is.na(treatment_start_date) | date < treatment_start_date) %>%
+  ungroup()
+
+dat_reg_trimmed %>%
+  filter(subject == "3001", date == ymd("2021-01-02"))
+```
+
+```{r}
+saveRDS(dat_reg_trimmed, file.path(dat_dir, "dat_reg_trimmed_tdia_30_blocked_expanded_two-handed.rds"))
+```
+
+## Raw self-report data
+
+```{r}
+dat_rep_trimmed <- all_rep_dat %>%
+  mutate(id = as.character(id)) %>%
+  left_join(start_dates, c("id" = "ID")) %>%
+  relocate(study_start_date, treatment_start_date, .after = daterated) %>%
+  filter(daterated >= study_start_date, is.na(treatment_start_date) | daterated < treatment_start_date) %>%
+  ungroup()
+
+dat_rep_trimmed
+```
+
+```{r fig.height=10}
+ggplot(dat_rep_trimmed, aes(daterated, menstrualbleeding)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~ id, scales = "free_x")
+
+ggplot(dat_rep_trimmed, aes(daterated, firstdayofperiod)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~ id, scales = "free_x")
+```
+
+# ICs vs fragmentation
+
+```{r}
+load(file.path(dat_dir, "dat_reg_frag_icas.rda"))
+na_pat <- readRDS(file.path(dat_dir, "missingness_fragmented.rds"))
+```
+
+```{r}
+s_df <- data.frame(icas[[1]]$S) %>%
+  add_column(subject = subs, date = dates, .before = 1)
+
+s_df
+```
+
+
+```{r}
+na_s <- na_pat %>%
+  pivot_wider(names_from = modality, values_from = good_block) %>%
+  left_join(s_df, by = c("subject", "date")) %>%
+  select(!c(X3, X4, X5)) %>%
+  pivot_longer(X1:X2, names_to = "ic")
+
+na_s
+```
+
+```{r fig.height=15}
+ggplot(na_s, aes(date)) +
+  geom_line(aes(y = value, color = ic)) +
+  geom_tile(aes(y = -3, fill = self_report)) +
+  scale_fill_manual(values = c("grey", "steelblue")) +
+  facet_wrap(~ subject, scales = "free_x")
+```
+
+# IC 3 vs participant means
+
+`prep_reg_dat` can be found in `multilevel_modelling.Rmd`.
+
+```{r}
+ls <- prep_reg_dat(
+  dat_path = file.path(dat_dir, "dat_reg_fragmented_no-tdia.rds"),
+  ica_path = file.path(dat_dir, "dat_reg_frag_icas.rda")
+)
+
+dat_reg_no_tdia <- ls$dat_reg
+dat_bi <- ls$dat_bi
+dat_sr <- ls$dat_sr
+icas <- ls$icas
+subs <- ls$subs
+dates <- ls$dates
+dat_c <- ls$dats_c[[1]]
+```
+
+```{r}
+ic_df <- data.frame(icas[[1]]$S) %>%
+  add_column(subject = subs, date = dates)
+
+dat_ica_sr <- dat_reg_no_tdia %>%
+  filter(modality == "self_report") %>%
+  pivot_wider(names_from = variable, values_from = value) %>%
+  inner_join(ic_df, by = c("subject", "date"))
+
+dat_ica_sr
+```
+
+```{r}
+all_means <- dat_ica_sr %>%
+  group_by(subject) %>%
+  summarize(across(c(ASIQ9_wishdead:mastery, X3), mean)) %>%
+  rowwise(subject, X3) %>%
+  summarize(mean = mean(c_across(ASIQ9_wishdead:mastery)))
+
+all_means
+```
+
+```{r}
+ggplot(all_means, aes(X3, mean)) +
+  geom_point()
+```
+
+```{r}
+cor.test(all_means$X3, all_means$mean)
+```
+
+```{r}
+time_mean <- dat_ica_sr %>%
+  rowwise(subject, date, X3) %>%
+  summarize(self_report = mean(c_across(ASIQ9_wishdead:mastery))) %>%
+  pivot_longer(c(X3, self_report), names_to = "modality")
+
+time_mean
+```
+
+```{r fig.height=10}
+ggplot(time_mean, aes(date, value, color = modality)) +
+  geom_line() +
+  labs(x = "Date", y = "Value", color = "Modality") +
+  scale_x_date(breaks = NULL) +
+  scale_color_hue(labels = c("Mean self-report rating", "Independent component 3")) +
+  facet_wrap(~ subject, scales = "free_x") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 8))
+```
+
+All in all, it is quite clear that IC 3 corresponds to the inverted mean item rating for several subjects.
+
+```{r}
+ggplot(time_mean %>% filter(subject == "3083"), aes(date, value, color = modality)) +
+  geom_line(lwd = 1) +
+  scale_color_manual(values = c("lightcoral", "turquoise4"),
+                     labels = c("Mean self-report rating", "Independent component 3")) +
+  labs(x = "Date", y = "Value", color = "Modality") +
+  theme_minimal()
+
+ggsave(file.path(man_img_dir, "ic3_timecourse.pdf"))
+```
+
+```{r}
+n_distinct(filter(time_mean, subject == "3083")$date)
+```
+
+# Key press bubble plot
+
+```{r}
+ls <- load_subject_key_data(dat_dir)
+dats_kp <- ls$dats_kp
+dats_ses <- ls$dats_ses
+subjects <- ls$subjects
+```
+
+```{r}
+sizes <- sapply(dats_ses, nrow)
+
+dat_ses <- dats_ses[sizes == max(sizes)][[1]]
+```
+
+```{r}
+dat_ses %>%
+  group_by(date) %>%
+  summarize(n = n())
+```
+
+```{r}
+hist(1 / (dat_ses$medianIKD[dat_ses$medianIKD < 0.5]))
+```
+
+
+```{r fig.height=10}
+reverse2_trans <- function() {
+  trans_new(
+    "reverse2",
+    function(x) as.Date(-1 * as.numeric(x), ymd("1970-01-01")), # Force values to be numeric for Date objects
+    function(x) as.Date(-1 * as.numeric(x), ymd("1970-01-01"))
+  )
+}
+
+ggplot(dat_ses %>%
+         filter(date > ymd("2020-12-31"), date < ymd("2021-12-31")), 
+       aes(hour, date, size = totalKeyPresses, color = medianIKD)) +
+  geom_point() +
+  xlab("Hour") +
+  ylab("Date") +
+  scale_y_continuous(
+    trans = c("date", "reverse2")
+  ) +
+  scale_size_continuous("Number of key presses") +
+  scale_color_viridis_c("Delay between keys (s)", limits = c(0, 0.5)) +
+  theme(text = element_text(size = 18))
+```
+
+```{r}
+ggplot(dat_ses %>%
+         group_by(hour) %>%
+         summarize(
+           sd = sd(medianIKD, na.rm = TRUE),
+           medianIKD = mean(medianIKD, na.rm = TRUE)
+         ), 
+       aes(hour, medianIKD)) +
+  geom_line(group = 1) +
+  geom_errorbar(aes(ymin = medianIKD - sd, ymax = medianIKD + sd))
+```
+
+```{r}
+load(file.path(dat_dir, "sub-3009/preproc/sub-3009_preprocessed.rda"))
+```
+
+```{r}
+acc_path <- file.path(dat_dir, "sub-3009/raw/sub-3009_accelerometer.psv")
+raw_acc <- read.table(acc_path, header = TRUE, sep = "|", strip.white = TRUE, fill = TRUE)
+
+dat_acc <- raw_acc %>%
+  mutate(
+    # Timezone is coded as number of hours deviating from UCT times 100
+    # (e.g. -600), so multiply by 36 to get offset in seconds.
+    sessionTimestampLocal = as_datetime(sessionTimestamp + createdOnTimeZone * 36),
+    sessionNumber = cumsum(sampleNumber == 1)
+  ) %>%
+  rename(x = xCoord, y = yCoord, z = zCoord)
+```
+
+```{r}
+saveRDS(dat_acc, file.path(dat_dir, "sub-3009/preproc/sub-3009_semi-raw-dat-acc.rds"))
+```
+
+
+ymd("2021-02-28")
+
+```{r}
+timestamps_kp <- dat_kp %>%
+  select(c(keypressTimestampLocal)) %>%
+  rename(timestamp = keypressTimestampLocal) %>%
+  add_column(modality = "Keyboard") %>%
+  filter(date(timestamp) == ymd("2021-02-28"))
+
+timestamps_acc <- dat_acc %>%
+  filter(date(sessionTimestampLocal) == ymd("2021-02-28")) %>%
+  mutate(timestamp = sessionTimestampLocal + seconds((sampleNumber - 1) * 0.1)) %>%
+  select(c(timestamp)) %>%
+  add_column(modality = "Accelerometer")
+
+timestamps_sr <- data.frame(timestamp = parse_date_time("2021-02-28 19:30:15", "Y-m-d H:M:S"),
+                            modality = "Self-report")
+
+timestamps <- bind_rows(timestamps_kp, timestamps_acc, timestamps_sr) %>%
+  filter(timestamp >= parse_date_time("2021-02-28 19:30", "Y-m-d H:M"),
+         timestamp < parse_date_time("2021-02-28 19:33", "Y-m-d H:M"))
+```
+
+```{r fig.height=10, fig.width=10}
+ggplot(timestamps, aes(timestamp, modality)) +
+  geom_point(aes(color = modality), size = 3) +
+  labs(x = "Time (seconds)", y = "Modality") +
+  guides(color = guide_legend("Modality", reverse = TRUE)) +
+  theme_minimal() +
+  theme(text = element_text(size = 15))
+```
+
+```{r}
+timestamps_kp <- dat_kp %>%
+  select(c(keypressTimestampLocal)) %>%
+  rename(timestamp = keypressTimestampLocal) %>%
+  add_column(modality = "Keyboard") %>%
+  filter(date(timestamp) >= ymd("2021-02-25"), date(timestamp) <= ymd("2021-02-28"))
+
+timestamps_acc <- dat_acc %>%
+  filter(date(sessionTimestampLocal) >= ymd("2021-02-25"), date(sessionTimestampLocal) <= ymd("2021-02-28")) %>%
+  mutate(timestamp = sessionTimestampLocal + seconds((sampleNumber - 1) * 0.1)) %>%
+  select(c(timestamp)) %>%
+  add_column(modality = "Accelerometer")
+
+dates <- unique(date(timestamps_kp$timestamp))
+timestamps_sr <- data.frame(timestamp = dates + hours(19),
+                            modality = "Self-report")
+
+timestamps <- bind_rows(timestamps_kp, timestamps_acc, timestamps_sr)
+```
+
+```{r fig.height=10, fig.width=10}
+ggplot(timestamps, aes(timestamp, modality)) +
+  geom_point(aes(color = modality), size = 3) +
+  labs(x = "Time", y = "Modality") +
+  guides(color = "none") +
+  theme_minimal() +
+  theme(text = element_text(size = 15))
+```
+
+```{r fig.height=10, fig.width=10}
+df <- data.frame(
+  timestamp = rep(c(ymd("2021-02-25"), 
+                    ymd("2021-02-26"), 
+                    ymd("2021-02-27"), 
+                    ymd("2021-02-28")), 
+                  3),
+  modality = rep(c("Accelerometer", "Keyboard", "Self-report"), each = 4)
+)
+
+ggplot(df, aes(timestamp, modality)) +
+  geom_point(aes(color = modality), size = 3) +
+  labs(x = "Time", y = "Modality") +
+  guides(color = "none") +
+  theme_minimal() +
+  theme(text = element_text(size = 15))
+```
+
+

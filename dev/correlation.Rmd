@@ -1,0 +1,311 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+setwd("M:/Documents/Autocorrelation")
+
+source("src/load_dependencies.R")
+```
+
+```{r}
+load("data/sub-3009/preproc/sub-3009_preprocessed.rda")
+```
+
+```{r}
+rep_file <- "../CLEAR3_Biaffect_Leow/Archived Versions/2022-02-15 - Updated Daily Dataset for Elena and Alex/20220215_clear3daily.csv"
+dat_rep <- read.csv(rep_file) %>%
+  filter(id == dat_kp$userID[1]) %>%
+  mutate(daterated = as.Date(daterated, format = "%m/%d/%Y"))
+
+dat_rep
+```
+
+```{r}
+dat_rep_full <- read.csv(rep_file) %>%
+  mutate(daterated = as.Date(daterated, format = "%m/%d/%Y"))
+```
+
+```{r}
+ftable(xtabs( ~ mhpYN_0 + mhpYN_1 + mhpYN_2, data = dat_rep_full, addNA = TRUE))
+```
+
+```{r}
+table(dat_rep_full$MJuse, useNA = "ifany")
+```
+
+Filter out columns that are not suited for a correlation analysis. Some comments:
+
+* Everything text-based has been removed.
+* posLHtoday has been removed as well, as its four consecutive values do not necessarily reflect an increase or decrease of something.
+* In contrast, I have included some boolean/binary variables, as their values can be interpreted as 'there is less/more presence of event x', introducing some sense of order. I have usually left them as integers instead of converting them to a logical type.
+* I think the stress_[n] columns represent an array of tick boxes, of which the subject could tick multiple boxes. Or perhaps these columns represent whether or not something was entered into the corresponding text fields (the values of which are not included in this data frame). Either way, I believe it is better to convert the `NA`s of these columns to 0.
+* The mhpYN_[n] columns are not too clear to me: I would expect mhpYN_1 and mhpYN_2 to have values of NA when mhpYN_0 is 1, but there are two cases where that assumption doesn't hold (as shown by a contingency table). I will convert `NA`s to 0 only if any of the other mhpYN variables does not have an NA value. (If all mhpYN values are NA, I suspect there has been a data collection error.)
+* Values of the type of marijuana intake (e.g. smokingTHCyn_1, vapeTHCyn_1, ...) are NA when MJuse is 0. However, I think it is fine to convert those `NA`s to 1 (indicating that no marijuana has been used in that way).
+
+```{r}
+# Replace NAs in partially complete cases
+repl_part_comp <- function(col, value, ...) {
+  other_cols <- list(...)
+  
+  case_when(
+    is.na(col) & !all(sapply(other_cols, is.na)) ~ value,
+    TRUE ~ col
+  )
+}
+
+dat_rep_cor <- dat_rep %>%
+  select(!c(id, posLHtoday, medchange_notes, medchange_notes_1_TEXT, 
+            usedPRN_1_TEXT, smokingTHCyn_2_1, vapeTHCyn_2_1, edibleTHCyn_2_1,
+            OtherTHCyn_2_1, CBDyn_2_1, recdrugs_yn_1_TEXT, Computer_date)) %>%
+  mutate(
+    mhpYN_0 = repl_part_comp(mhpYN_0, value = as.integer(0), mhpYN_1, mhpYN_2),
+    mhpYN_1 = repl_part_comp(mhpYN_1, value = as.integer(0), mhpYN_0, mhpYN_2),
+    mhpYN_2 = repl_part_comp(mhpYN_2, value = as.integer(0), mhpYN_0, mhpYN_1),
+    smokingTHCyn_1 = repl_part_comp(smokingTHCyn_1, as.integer(1), MJuse),
+    vapeTHCyn_1 = repl_part_comp(vapeTHCyn_1, as.integer(1), MJuse),
+    edibleTHCyn_1 = repl_part_comp(edibleTHCyn_1, as.integer(1), MJuse),
+    OtherTHCyn_1 = repl_part_comp(OtherTHCyn_1, as.integer(1), MJuse),
+    CBDyn_1 = repl_part_comp(CBDyn_1, as.integer(1), MJuse)
+  )
+
+# Create replacement vector based on column names
+rep_names <- na.omit(str_extract(colnames(dat_rep_cor), "stress_[0-9]+"))
+rep_list <- as.list(setNames(rep(0, length(rep_names)), rep_names))
+dat_rep_cor <- dat_rep_cor %>% 
+  replace_na(rep_list)
+
+dat_rep_cor
+```
+
+
+```{r warning=FALSE}
+# This matrix need not be positive semi-definite due to pairwise deletion
+cors <- cor(dat_rep_cor %>% select(!daterated), method = "spearman", use = "pairwise.complete.obs")
+cors <- melt(cors, varnames = c("x", "y"))
+```
+
+```{r fig.height=10}
+ggplot(cors) +
+  geom_raster(aes(x, y, fill = value)) +
+  scale_fill_gradient2() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+
+```{r}
+var_vars <- cov(dat_rep_cor %>% select(!daterated), use = "pairwise.complete.obs")
+var_vars <- melt(var_vars, varnames = c("x", "y"))
+```
+
+```{r fig.height=10}
+ggplot(var_vars) +
+  geom_raster(aes(x, y, fill = value)) +
+  scale_fill_gradient2() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+
+# Aggregate key press data per day, join with self-report data
+
+```{r}
+dat_day <- dat_ses %>%
+  group_by(date) %>%
+  summarize(
+    medianIKD = mean(medianIKD),
+    percent95IKD = mean(percent95IKD),
+    madIKD = mean(madIKD),
+    autocorrectRate = mean(autocorrectRate),
+    backspaceRate = mean(backspaceRate),
+    totalKeyPresses = sum(totalKeyPresses),
+    active = mean(active),
+    upright = mean(upright),
+    bed = mean(bed),
+    numSes = n()
+  )
+
+dat_day
+```
+
+```{r fig.height=10}
+dat_day_rep_cor <- dat_day %>%
+  full_join(dat_rep_cor, by = c("date" = "daterated")) %>%
+  select(!c(date))
+
+# Exclude columns that consist of >90% NAs, as they distort the correlation numbers
+sel <- colMeans(is.na(dat_day_rep_cor)) < 0.9
+
+dat_day_rep_cor <- dat_day_rep_cor[,sel]
+```
+
+```{r warning=FALSE}
+cors <- cor(dat_day_rep_cor, method = "spearman", use = "pairwise.complete.obs")
+cors <- melt(cors, varnames = c("x", "y"))
+```
+
+```{r fig.height=15}
+ggplot(cors) +
+  geom_raster(aes(x, y, fill = value)) +
+  scale_fill_gradient2(low = muted("blue"), high = muted("red"), limits = c(-1, 1)) +
+  theme(text = element_text(size=12),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggsave("images/cor_matrix.png", width = 1920, height = 1080, units = "px", dpi = 80)
+```
+
+# Run calculation for every subject
+
+```{r warning=FALSE}
+dat_dir <- "data"
+rep_file <- "../CLEAR3_Biaffect_Leow/Archived Versions/2022-02-15 - Updated Daily Dataset for Elena and Alex/20220215_clear3daily.csv"
+
+# Replace NAs in partially complete cases
+repl_part_comp <- function(col, value, ...) {
+  other_cols <- list(...)
+  
+  case_when(
+    is.na(col) & !all(sapply(other_cols, is.na)) ~ value,
+    TRUE ~ col
+  )
+}
+
+### Listing available raw data files
+
+dirs <- list.dirs(dat_dir)
+
+pattern <- "sub-([0-9]+)/raw$"
+raw_paths <- str_subset(dirs, pattern)
+subjects <- str_match(raw_paths, pattern)[,2]
+
+### Preprocessing for every subject that has both key press and accelerometer
+### data
+
+for (sub in subjects) {
+  print(str_glue("Calculating correlations for subject {sub}"))
+
+  ### Loading data ###
+  
+  print("Loading data...")
+  
+  load(str_glue("data/sub-{sub}/preproc/sub-{sub}_preprocessed.rda"))
+  
+  dat_day <- dat_ses %>%
+    group_by(date) %>%
+    summarize(
+      medianIKD = mean(medianIKD),
+      percent95IKD = mean(percent95IKD),
+      madIKD = mean(madIKD),
+      autocorrectRate = mean(autocorrectRate),
+      backspaceRate = mean(backspaceRate),
+      totalKeyPresses = sum(totalKeyPresses),
+      active = mean(active),
+      upright = mean(upright),
+      bed = mean(bed),
+      numSes = n()
+    )
+  
+  dat_rep <- read.csv(rep_file) %>%
+    filter(id == dat_kp$userID[1]) %>%
+    mutate(daterated = as.Date(daterated, format = "%m/%d/%Y"))
+  
+  ### Preparing self-report data for correlation calculations ###
+  
+  print("Joining self-report and key press data...")
+  
+  dat_rep_cor <- dat_rep %>%
+    select(!c(id, posLHtoday, medchange_notes, medchange_notes_1_TEXT, 
+              usedPRN_1_TEXT, smokingTHCyn_2_1, vapeTHCyn_2_1, edibleTHCyn_2_1,
+              OtherTHCyn_2_1, CBDyn_2_1, recdrugs_yn_1_TEXT, Computer_date)) %>%
+    mutate(
+      mhpYN_0 = repl_part_comp(mhpYN_0, value = as.integer(0), mhpYN_1, mhpYN_2),
+      mhpYN_1 = repl_part_comp(mhpYN_1, value = as.integer(0), mhpYN_0, mhpYN_2),
+      mhpYN_2 = repl_part_comp(mhpYN_2, value = as.integer(0), mhpYN_0, mhpYN_1),
+      smokingTHCyn_1 = repl_part_comp(smokingTHCyn_1, as.integer(1), MJuse),
+      vapeTHCyn_1 = repl_part_comp(vapeTHCyn_1, as.integer(1), MJuse),
+      edibleTHCyn_1 = repl_part_comp(edibleTHCyn_1, as.integer(1), MJuse),
+      OtherTHCyn_1 = repl_part_comp(OtherTHCyn_1, as.integer(1), MJuse),
+      CBDyn_1 = repl_part_comp(CBDyn_1, as.integer(1), MJuse)
+    )
+  
+  # Create replacement vector based on column names
+  rep_names <- na.omit(str_extract(colnames(dat_rep_cor), "stress_[0-9]+"))
+  rep_list <- as.list(setNames(rep(0, length(rep_names)), rep_names))
+  dat_rep_cor <- dat_rep_cor %>% 
+    replace_na(rep_list)
+  
+  ### Join self-report and key press data ###
+  
+  dat_day_rep_cor <- dat_day %>%
+    full_join(dat_rep_cor, by = c("date" = "daterated")) %>%
+    select(!c(date))
+  
+  print("Calculating correlations...")
+  
+  cors <- cor(dat_day_rep_cor, method = "spearman", use = "pairwise.complete.obs")
+  
+  ### Save correlation matrix ###
+  
+  print("Saving to file.")
+  
+  out_path <- file.path(dat_dir, str_glue("sub-{sub}"), "correlation")
+  dir.create(out_path, showWarnings = FALSE, recursive = TRUE)
+  
+  out_file <- file.path(out_path, str_glue("sub-{sub}_correlation.rda"))
+  save(cors, file = out_file)
+}
+```
+
+# Permutation of columns
+
+We need `dat_day_rep_cor` from above.
+
+```{r}
+mat <- matrix(1:25, ncol = 5)
+mat <- data.frame(mat)
+
+col_permute <- function(mat) {
+  apply(mat, 2, sample)
+}
+
+p_mats <- replicate(1000, apply(mat, 2, sample))
+```
+
+```{r warning=FALSE}
+permute_cor <- function(dat) {
+  cor(apply(dat, 2, sample), # Permute every column
+      method = "spearman", use = "pairwise.complete.obs")
+}
+
+p_cor <- replicate(100, permute_cor(dat_day_rep_cor))
+head(p_cor)
+```
+
+## Testing parallelisation
+
+```{r}
+library(parallel)
+```
+
+```{r}
+# detectCores() returns 16, let's use 10 threads
+n_threads <- 10
+
+# Number of permutations
+n_perms <- 10000
+
+cl <- makeCluster(n_threads)
+clusterSetRNGStream(cl, NULL) # Make sure every thread uses a different RNG stream
+
+# x is ignored
+permute_cor <- function(x, dat) {
+  cor(apply(dat, 2, sample), # Permute every column
+      method = "spearman", use = "pairwise.complete.obs")
+}
+
+res <- parSapply(cl, 1:n_perms, permute_cor, dat_day_rep_cor)
+
+stopCluster(cl)
+```
+
+

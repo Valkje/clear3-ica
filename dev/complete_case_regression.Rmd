@@ -1,0 +1,274 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+local <- TRUE
+
+if (!local) {
+  # Cluster environment
+  setwd("~/Documents/Autocorrelation")
+  # Base directory for the data set we will create
+  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
+} else {
+  setwd("~/HPC/Documents/Autocorrelation")
+  # Base directory for the data set we will create
+  dat_dir <- "~/HPC_project/data"
+}
+
+source("src/load_dependencies.R")
+```
+
+# Loading and scaling data
+
+```{r}
+load(file.path(dat_dir, "dat_reg_tdia_30_blocked.rda"))
+```
+
+Scaling continuous variables (except mean_accuracy and date).
+
+```{r}
+should.rescale <- sapply(dat_reg, typeof) == "double"
+should.rescale["mean_accuracy"] <- FALSE
+should.rescale["date"] <- FALSE
+
+dat_reg_scaled <- dat_reg
+dat_reg_scaled[,should.rescale] <- scale(dat_reg_scaled[,should.rescale])
+dat_reg_scaled
+```
+
+# Predicting TDIA
+
+```{r}
+m1 <- glmer(mean_accuracy ~ . - subject - partition_idx - date + (1 | subject), 
+            data = dat_reg_scaled,
+            family = "binomial")
+summary(m1)
+```
+
+Too many predictors, most likely. We need to be more selective about which variables we use.
+Let's go for the aggregates first.
+
+```{r}
+m2 <- glmer(mean_accuracy ~ suicidality_mean + 
+              PMDDemosx_mean +
+              environment_int +
+              rumination +
+              agitation +
+              impulsivity +
+              irritability_mean +
+              n_stressors +
+              (1 | subject), 
+            data = dat_reg_scaled,
+            family = "binomial")
+summary(m2)
+```
+
+Hm, still convergence issues, and nothing is significant. Perhaps more iterations?
+
+```{r}
+ss <- getME(m2, c("theta", "fixef"))
+m2a <- update(m2, start = ss,
+              control = glmerControl(optCtrl = list(maxfun = 2e4)))
+summary(m2a)
+```
+
+That helped solve the convergence issue, but nothing here is significant. Perhaps it's better to use accuracy as the predictor rather than the dependent variable. Not that the self-report variables are very normally distributed:
+
+```{r}
+hist(dat_reg_scaled$DRSPx_panicked)
+```
+
+From predicting the self-report measures, we find several variables that could be interesting. Let's see if we can plug them into a single model:
+
+```{r}
+m3 <- glmer(mean_accuracy ~ numdrinks_yest +
+              DRSPx_worried +
+              DRSPx_afraid +
+              DRSPx_notenjoy +
+              DRSP17_outofcontrol +
+              PANAS_happy +
+              mastery +
+              suicidality_mean +
+              PMDDemosx_mean +
+              (1 | subject),
+            data = dat_reg_scaled,
+            family = "binomial",
+            verbose = 0,
+            control = glmerControl("nloptwrap"))
+summary(m3)
+```
+
+No luck. Try to re-fit:
+
+```{r}
+m3.all <- allFit(m3, data = dat_reg_scaled)
+summary(m3.all)
+```
+
+Still no luck.
+
+## Predicting TDIA with only numdrinks_yest
+
+```{r}
+m4 <- glmer(mean_accuracy ~ numdrinks_yest + (1 | subject),
+            data = dat_reg_scaled,
+            family = "binomial")
+summary(m4)
+```
+
+# Predicting the self-report measures
+
+```{r paged.print=FALSE}
+# Indices of self-report columns
+rep_var_idx <- 5:ncol(dat_reg_scaled)
+
+models <- vector("list", length(rep_var_idx))
+accuracies <- as.vector(dat_reg_scaled$mean_accuracy)
+sub_codes <- as.vector(dat_reg_scaled$subject)
+col_names <- colnames(dat_reg_scaled)
+
+for (i in 1:length(rep_var_idx)) {
+  idx <- rep_var_idx[i]
+  
+  rep_var <- as.vector(dat_reg_scaled[[idx]])
+  
+  if (typeof(rep_var) != "double") {
+    print("Not numeric, skipping.")
+    next
+  }
+  
+  models[[i]] <- lme(rep_var ~ accuracies, random = ~ 1 | sub_codes,
+                     correlation = corAR1(), na.action = na.omit)
+  # models[[i]] <- lme(rep_var ~ accuracies, random = ~ 1 | sub_codes,
+  #                    na.action = na.omit)
+  
+  summ <- summary(models[[i]])
+  t_val <- summ$tTable[2,4]
+  if (abs(t_val) > 2) {
+    print(col_names[idx])
+    print(summary(models[[i]]))
+    cat("\n-----------------------------\n\n")
+  }
+}
+```
+
+```{r}
+for (i in rep_var_idx) {
+  if (typeof(dat_reg_scaled[[i]]) != "double")
+    next
+  
+  hist(dat_reg_scaled[[i]], main = col_names[i])
+}
+```
+
+```{r}
+table(dat_reg_scaled$numdrinks_yest)
+```
+
+
+It kind of looks like some variables might be gamma-distributed (especially the summary ones). To create gamma models, we must use unscaled variables, primarily because the gamma distribution is undefined over negative values.
+
+```{r}
+table(dat_reg$numdrinks_yest)
+```
+
+
+```{r}
+# Indices of self-report columns
+rep_var_idx <- 13:ncol(dat_reg)
+
+models_gamma <- vector("list", length(rep_var_idx))
+accuracies <- as.vector(dat_reg$mean_accuracy)
+sub_codes <- as.vector(dat_reg$subject)
+col_names <- colnames(dat_reg)
+
+for (i in 1:length(rep_var_idx)) {
+  idx <- rep_var_idx[i]
+  print(col_names[idx])
+  
+  if (typeof(rep_var) != "double") {
+    print("Not numeric, skipping.")
+    next
+  }
+  
+  tryCatch({
+    rep_var <- as.vector(dat_reg[[idx]]) + 0.001
+    
+    models_gamma[[i]] <- glmer(rep_var ~ accuracies + (1 | sub_codes), 
+                               family = Gamma(link = "log"),
+                               control = glmerControl("bobyqa"))
+  }, error = function(cond) {
+    message(paste0(cond, "\n"))
+    message(paste0("Skipping ", col_names[idx], "\n"))
+  })
+  
+  print(summary(models_gamma[[i]]))
+}
+```
+
+## Predict numdrinks_yest with Poisson
+
+```{r}
+mPois <- glmer(numdrinks_yest ~ mean_accuracy + (1 | subject),
+               data = dat_reg,
+               family = poisson())
+summary(mPois)
+```
+
+```{r}
+y <- na.omit(dat_reg$numdrinks_yest[!is.na(dat_reg$mean_accuracy)])
+y_hat <- fitted(mPois)
+plot(y, y_hat)
+```
+
+```{r}
+print(mean(dat_reg$numdrinks_yest[!is.na(dat_reg$mean_accuracy)], na.rm = TRUE))
+print(var(dat_reg$numdrinks_yest[!is.na(dat_reg$mean_accuracy)], na.rm = TRUE))
+```
+
+I believe we have some overdispersion. Perhaps better to model this with a quasi-poisson distribution, but lmer seems to be unable to handle that.
+
+```{r}
+fixef(mPois)
+```
+
+
+```{r}
+coeff <- fixef(mPois)
+
+lambda_low_acc <- exp(coeff[["(Intercept)"]])
+lambda_high_acc <- exp(coeff[["(Intercept)"]] + coeff[["mean_accuracy"]])
+
+x <- 0:10
+df <- data.frame(numdrinks_yest = rep(x, times = 2), 
+                 density = c(dpois(x, lambda_low_acc), dpois(x, lambda_high_acc)), 
+                 accuracy = rep(c("Low", "High"), each = length(x)))
+
+ggplot(df, aes(numdrinks_yest, density)) +
+  geom_line(aes(color = accuracy))
+
+ggsave("images/regression/poisson.png")
+```
+
+```{r}
+counts <- dat_reg %>%
+  ungroup() %>%
+  mutate(high_acc = mean_accuracy >= 0.5) %>%
+  count(high_acc, numdrinks_yest) %>%
+  drop_na() %>%
+  add_row(high_acc = TRUE, numdrinks_yest = 9, n = 0, .before = 21) %>%
+  group_by(high_acc) %>%
+  mutate(n = n / max(n))
+
+df$count <- counts$n / max(counts$n)
+
+ggplot(df, aes(numdrinks_yest)) +
+  geom_line(aes(y = density, color = accuracy)) +
+  geom_point(aes(y = count, color = accuracy), alpha = 0.5) +
+  ylab("Density or Normalised count")
+
+ggsave("images/regression/poisson.png")
+```
+

@@ -1,0 +1,119 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+local <- TRUE
+
+wd <- ""
+
+if (!local) {
+  # Cluster environment
+  wd <- "~/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
+} else {
+  wd <- "/Volumes/home/preclineu/lorkno/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "~/HPC_project/data"
+}
+
+# For some reason this sets the pwd only for the current scope, which means it 
+# does not affect anything outside an if block if you set it there.
+# So that's why it's here instead of above.
+setwd(wd) 
+
+source("src/load_dependencies.R")
+```
+
+```{r}
+load(file.path(dat_dir, "dat_reg_contig_icas.rda"))
+
+dat_reg_contig <- readRDS(file.path(dat_dir, "dat_reg_semi_contiguous.rds"))
+dat_reg_contig
+```
+
+```{r}
+sub_dates <- dat_reg_contig %>%
+  filter(modality == "self_report") %>%
+  group_by(subject) %>%
+  distinct(date)
+
+s_df <- data.frame(icas[[1]]$S)
+
+sub_ts <- cbind(sub_dates, s_df) %>%
+  group_by(subject) %>%
+  arrange(date, .by_group = TRUE) %>%
+  mutate(
+    change = c(TRUE, diff(date) > 1), # Mark non-contiguity as TRUE
+    block = cumsum(change)
+  ) %>%
+  select(!change) %>%
+  pivot_longer(starts_with("X"), names_to = "IC") %>%
+  group_by(subject, block, IC) %>%
+  filter(n() > 61) %>% # Get proper estimates
+  summarize(
+    ts = list(ts(value, c(year(date[1]), yday(date[1])), frequency = 365)),
+    # ts = list(ts(value, mday(date[1]), frequency = 60)),
+    # spec = list(spectrum(ts[[1]], spans = c(3, 5), plot = FALSE))
+  ) %>%
+  group_by(subject, block) %>%
+  summarize(
+    ts = list(do.call(ts.union, c(ts))),
+    spec = list(spectrum(ts[[1]], spans = c(3, 5), plot = FALSE))
+  )
+
+sub_ts
+```
+
+
+```{r fig.height=8}
+for (i in 1:nrow(sub_ts)) {
+  row <- sub_ts[i,]
+  plot(row$spec[[1]], main = row$subject, log = "no")
+  abline(v = 12, lty = "dashed") # Twelve cycles / year, i.e. one cycle / month
+}
+```
+
+```{r fig.height=8}
+df <- sub_ts %>%
+  mutate(
+    freq = lapply(spec, function(s) data.frame(freq = s$freq)),
+    dens = lapply(spec, function(s) data.frame(s$spec)),
+  ) %>%
+  select(subject, freq, dens) %>%
+  unnest(c(freq, dens)) %>%
+  pivot_longer(starts_with("X"), names_to = "IC")
+
+ggplot(df, aes(freq, value)) +
+  geom_line(aes(color = IC)) +
+  geom_vline(xintercept = 12, linetype = "dashed") +
+  facet_wrap(~ subject, scales = "free_y") +
+  xlab("Frequency (cycles / year)") +
+  ylab("Spectral density")
+
+ggplot(df, aes(freq, log(value))) +
+  geom_line(aes(color = IC)) +
+  geom_vline(xintercept = 12, linetype = "dashed") +
+  facet_wrap(~ subject, scales = "free_y") +
+  xlab("Frequency (cycles / year)") +
+  ylab("Spectral density (log)")
+```
+
+
+```{r fig.height=8}
+t <- seq(0, 100, by = 0.1)
+x1 <- cos(2*pi*0.8*t)
+x2 <- cos(2*pi*1.2*t)
+plot(t, x1, type = "l", col = "darkred")
+lines(t, x2, col = "steelblue")
+
+x <- x1 + x2
+plot(t, x, type = "l")
+```
+
+```{r}
+spectrum(x, log = "no", spans = c(3, 5))
+```
+

@@ -1,0 +1,719 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+local <- TRUE
+
+wd <- ""
+
+if (!local) {
+  # Cluster environment
+  wd <- "~/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
+} else {
+  wd <- "/Volumes/home/preclineu/lorkno/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "~/HPC_project/data"
+}
+
+model_dir <- file.path(dat_dir, "complete_data_models")
+
+# For manuscript images
+man_img_dir <- file.path("~/Documents/Writing/Papers/Paper 1/images")
+
+# For some reason this sets the pwd only for the current scope, which means it 
+# does not affect anything outside an if block if you set it there.
+# So that's why it's here instead of above.
+setwd(wd) 
+
+source("src/load_dependencies.R")
+library(fastICA)
+```
+
+# Get/set seed
+
+I would like to avoid setting the seed manually. I'll record my seed from today (14-06-2023) and use that in later runs of this script.
+
+```{r}
+# if(!exists(".Random.seed")) set.seed(NULL)
+# seed <- .Random.seed
+# saveRDS(seed, file.path(dat_dir, "sens_seed.rds"))
+
+seed <- readRDS(file.path(dat_dir, "sens_seed.rds"))
+```
+
+# Prepare ICAs
+
+For now, only do the 5-component solution.
+
+```{r}
+replicate_icas <- function(dat_path, n = 100, out_path = NULL, sub_norm = FALSE) {
+  set.seed(seed)
+  
+  ### Data prep
+  
+  dat_reg <- readRDS(dat_path)
+  
+  dat_reg_sr <- dat_reg %>%
+    filter(modality == "self_report", !is.na(value)) %>%
+    select(!c(study_start_date, treatment_start_date, modality)) %>%
+    group_by(variable) %>%
+    mutate(
+      logged = case_when(
+        min(value) == 0 ~ log(value + 1), # To prevent log(0) = NA values
+        TRUE ~ log(value)
+      ),
+      scaled = scale(value)
+    ) %>%
+    ungroup()
+  
+  if (sub_norm) {
+    # Normalize variance within subjects
+    dat_reg_sr <- dat_reg_sr %>%
+      group_by(subject, variable) %>%
+      mutate(logged = scale(logged, scale = FALSE)) %>%
+      ungroup()
+  }
+  
+  df <- dat_reg_sr %>%
+    select(!c(value, scaled)) %>% 
+    pivot_wider(names_from = variable, values_from = logged) %>%
+    arrange(subject, date) 
+  
+  subs <- df$subject
+  dates <- df$date
+  
+  df <- df %>%
+    select(!c(subject, date))
+  
+  # t x q
+  mat <- sapply(df, as.vector)
+  
+  means <- colMeans(mat)
+  
+  ### Running the ICAs
+  
+  icas <- replicate(
+    n = n, 
+    fastICA(mat, n.comp = 5, alg.typ = "parallel", fun = "logcosh"),
+    simplify = FALSE
+  )
+  
+  ls <- list(icas = icas, subs = subs, dates = dates)
+  
+  if (!is.null(out_path))
+    saveRDS(ls, file = out_path)
+  
+  ls
+}
+
+prep_reg_dat <- function(dat_path, icas, subs, dates, general_idx) {
+  # Semi-contiguous or fragmented data
+  dat_reg <- readRDS(dat_path)
+  
+  dat_bi <- dat_reg %>%
+    filter(modality == "biaffect") %>%
+    select(!c(study_start_date, treatment_start_date, modality)) %>%
+    pivot_wider(names_from = variable, values_from = value) %>%
+    select(-any_of(c("partition_idx")))
+  
+  # Select components that correspond to general affect components
+  dats <- map2(icas, general_idx, function(ica, idx) {
+    data.frame(X = ica$S[,idx]) %>%
+      add_column(subject = subs, date = dates) %>%
+      inner_join(dat_bi, by = c("subject", "date")) %>%
+      mutate(
+        week = week(date),
+        sub_week = paste(subject, week, sep = " - ") # For convenience
+      ) %>%
+      relocate(subject, date, week, sub_week, .before = X)
+  })
+  
+  dats_f <- lapply(dats, function(dat) {
+    dat %>%
+      group_by(sub_week) %>%
+      filter(n() > 1) %>%
+      ungroup()
+  })
+  
+  dats_c <- lapply(dats_f, function(dat) {
+    dat %>%
+      mutate(
+        totalKeyPresses = log(totalKeyPresses),
+        across(medianIKD:bed, scale)
+      )
+  })
+  
+  dats_c
+}
+```
+
+```{r}
+ls <- replicate_icas(file.path(dat_dir, "dat_reg_semi_contiguous_no-tdia.rds"),
+                     out_path = file.path(dat_dir, "icas_sens_no-tdia.rds"))
+
+icas <- ls$icas
+subs <- ls$subs
+dates <- ls$dates
+```
+
+We use `sens_helper.R` to mark the general affect components and save the marked component indices to `general_idx_sens.rds`.
+
+```{r}
+general_idx <- readRDS(file.path(dat_dir, "general_idx_sens.rds"))
+general_idx <- as.integer(general_idx)
+```
+
+# Run models
+
+Prepare data.
+
+```{r}
+dats_c <- prep_reg_dat(file.path(dat_dir, "dat_reg_semi_contiguous_no-tdia.rds"),
+                       icas, subs, dates,
+                       general_idx)
+```
+
+Create models.
+
+```{r}
+models <- lapply(dats_c, function(dat_c) {
+  lme(X ~ medianIKD +
+        percent95IKD +
+        madIKD +
+        autocorrectRate +
+        backspaceRate +
+        totalKeyPresses +
+        active +
+        upright,
+      random = ~ 1 | subject / week,
+      data = dat_c)
+})
+```
+
+Extract p values.
+
+```{r}
+p_vals <- sapply(models, function(m) {
+  summary(m)$tTable[,5]
+})
+
+p_val_df <- data.frame(t(p_vals)) %>%
+  pivot_longer(everything(), names_to = "variable") %>%
+  filter(variable != "X.Intercept.")
+
+p_val_df
+```
+
+
+Plot p values.
+
+```{r fig.height=10}
+ggplot(p_val_df, aes(value)) +
+  geom_histogram(bins = 60) +
+  facet_wrap(~ variable, scales = "free_x", labeller = as_labeller(c(
+    medianIKD = "Median IKD",
+    percent95IKD = "95th percentile IKD",
+    madIKD = "MAD IKD",
+    autocorrectRate = "Autocorrect rate",
+    backspaceRate = "Backspace rate",
+    totalKeyPresses = "Total number of key presses",
+    active = "Movement rate",
+    upright = "Upright rate"
+  ))) +
+  ylab("Count") +
+  xlab("p value") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 14, family = "serif"),
+    strip.text = element_text(size = 14, family = "serif"),
+    panel.border = element_rect(fill = NA, color = "grey")
+  )
+```
+
+```{r fig.height=10}
+ggplot(p_val_df, aes(value)) +
+  geom_histogram(bins = 60) +
+  facet_wrap(~ variable, scales = "free_x", labeller = as_labeller(c(
+    medianIKD = "Median IKD",
+    percent95IKD = "95th percentile IKD",
+    madIKD = "MAD IKD",
+    autocorrectRate = "Autocorrect rate",
+    backspaceRate = "Backspace rate",
+    totalKeyPresses = "Total number of key presses",
+    active = "Movement rate",
+    upright = "Upright rate"
+  ))) +
+  ylab("Count") +
+  xlab("p value") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 14, family = "serif"),
+    strip.text = element_text(size = 14, family = "serif"),
+    panel.border = element_rect(fill = NA, color = "grey")
+  )
+```
+
+Significant p values.
+
+```{r}
+bonf_p_vals <- p_val_df[p_val_df$variable == "active",]$value * 5 * 8
+mean(bonf_p_vals < 0.05)
+```
+
+```{r}
+range(bonf_p_vals)
+table(signif(bonf_p_vals, 2))
+mean(bonf_p_vals > 0.001)
+```
+
+```{r}
+round(bonf_p_vals, 5)
+```
+
+
+Proportion of smallest p values.
+
+```{r}
+mean(p_val_df[p_val_df$variable == "active",]$value < 1e-5)
+```
+
+Beta values.
+
+```{r}
+betas <- sapply(models, function(m) summary(m)$tTable["active", 1])
+range(betas)
+plot(bonf_p_vals, betas)
+```
+
+```{r}
+table(signif(betas, 2))
+```
+
+
+Does the size of the p values coincide with the component splitting for the non-fragmented ICA? (Conclusion: Yes, it does.)
+
+```{r fig.height=10}
+mix_dfs <- lapply(icas, function(ica) {
+  data.frame(ica$A) %>%
+    rename_with(function(x) mat_names) %>%
+    add_column(ic = 1:nrow(ica$A), .before = 1) %>%
+    pivot_longer(!ic, names_to = "variable", values_to = "loading") %>%
+    mutate(
+      variable = var_dict[variable],
+      variable = fct_rev(factor(variable, var_dict, ordered = TRUE)),
+      variable_code = as.numeric(variable)
+    )
+})
+
+big_mix_df <- bind_rows(mix_dfs, .id = "run") %>%
+  mutate(run = as.integer(run))
+
+ps <- p_vals["active",]
+
+for (i in seq(5, 100, 5)) {
+  p_dict <- sprintf("%d: %#.2g", (i-4):i, ps[(i-4):i])
+  names(p_dict) <- (i-4):i
+  
+  g <- ggplot(big_mix_df %>% filter((i - 5) < run, run <= i), 
+         aes(loading, variable, fill = loading)) +
+    geom_col() +
+    facet_grid(vars(run), vars(ic), labeller = labeller(run = p_dict)) +
+    scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                         name = "Loading") +
+    xlim(-0.6, 0.6) +
+    xlab("Loading") +
+    ylab("Variable") +
+    theme(text = element_text(size = 22, family = "serif"),
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          axis.text.y = element_text(size = 5))
+  
+  print(g)
+}
+```
+
+# Fragmented data
+
+```{r}
+ls <- replicate_icas(file.path(dat_dir, "dat_reg_fragmented_no-tdia.rds"))
+icas_frag <- ls$icas
+subs_frag <- ls$subs
+dates_frag <- ls$dates
+```
+
+```{r fig.height=10}
+fancy_mix_fig(icas_frag[[1]])
+```
+
+Use sens_helper.R to get general_idx_frag.
+
+```{r}
+general_idx_frag <- readRDS(file.path(dat_dir, "general_idx_frag_sens2.rds"))
+general_idx_frag <- as.integer(general_idx_frag)
+
+dats_c_frag <- prep_reg_dat(file.path(dat_dir, "dat_reg_fragmented_no-tdia.rds"),
+                       icas_frag, subs_frag, dates_frag,
+                       general_idx_frag)
+
+models_frag <- lapply(dats_c_frag, function(dat_c) {
+  lme(X ~ medianIKD +
+        percent95IKD +
+        madIKD +
+        autocorrectRate +
+        backspaceRate +
+        totalKeyPresses +
+        active +
+        upright,
+      random = ~ 1 | subject / week,
+      data = dat_c)
+})
+
+p_vals_frag <- sapply(models_frag, function(m) {
+  summary(m)$tTable[,5]
+})
+
+p_val_df_frag <- data.frame(t(p_vals_frag)) %>%
+  pivot_longer(everything(), names_to = "variable") %>%
+  filter(variable != "X.Intercept.")
+```
+
+```{r fig.height=10}
+ggplot(p_val_df_frag, aes(value)) +
+  geom_histogram(bins = 60) +
+  facet_wrap(~ variable, scales = "free_x", labeller = as_labeller(c(
+    medianIKD = "Median IKD",
+    percent95IKD = "95th percentile IKD",
+    madIKD = "MAD IKD",
+    autocorrectRate = "Autocorrect rate",
+    backspaceRate = "Backspace rate",
+    totalKeyPresses = "Total number of key presses",
+    active = "Movement rate",
+    upright = "Upright rate"
+  ))) +
+  ylab("Count") +
+  xlab("p value") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 14, family = "serif"),
+    strip.text = element_text(size = 14, family = "serif"),
+    panel.border = element_rect(fill = NA, color = "grey")
+  )
+
+ggplot(p_val_df_frag %>% filter(variable == "active"), aes(value)) +
+  geom_histogram(bins = 60) +
+  ylab("Count") +
+  xlab("p value") +
+  labs(title = "Movement rate significance") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 20, family = "serif"),
+    title = element_text(size = 24, family = "serif"),
+    panel.border = element_rect(fill = NA, color = "grey")
+  )
+```
+
+Significant p values.
+
+```{r}
+bonf_p_vals <- p_val_df_frag[p_val_df_frag$variable == "active",]$value * 5 * 8
+mean(bonf_p_vals < 0.05)
+```
+
+```{r}
+range(bonf_p_vals)
+table(signif(bonf_p_vals, 2))
+mean(bonf_p_vals > 0.001)
+```
+
+Proportion of smallest p values.
+
+```{r}
+mean(p_val_df_frag[p_val_df_frag$variable == "active",]$value < 1e-5)
+```
+
+Beta values.
+
+```{r}
+table(signif(betas, 2))
+```
+
+```{r}
+betas <- sapply(models_frag, function(m) summary(m)$tTable["active", 1])
+range(betas)
+plot(bonf_p_vals, betas)
+```
+
+
+Plot mixing matrices with their p values to check if the higher p values correspond to the split ICA solutions (conclusion: They do).
+
+```{r}
+mix_dfs <- lapply(icas_frag, function(ica) {
+  data.frame(ica$A) %>%
+    rename_with(function(x) mat_names) %>%
+    add_column(ic = 1:nrow(ica$A), .before = 1) %>%
+    pivot_longer(!ic, names_to = "variable", values_to = "loading") %>%
+    mutate(
+      variable = var_dict[variable],
+      variable = fct_rev(factor(variable, var_dict, ordered = TRUE)),
+      variable_code = as.numeric(variable)
+    )
+})
+
+big_mix_df <- bind_rows(mix_dfs, .id = "run") %>%
+  mutate(run = as.integer(run))
+  
+big_mix_df
+```
+
+```{r fig.height=10}
+p_vals <- p_vals_frag["active",]
+
+for (i in seq(5, 100, 5)) {
+  p_dict <- sprintf("%d: %#.2g", (i-4):i, p_vals[(i-4):i])
+  names(p_dict) <- (i-4):i
+  
+  g <- ggplot(big_mix_df %>% filter((i - 5) < run, run <= i), 
+         aes(loading, variable, fill = loading)) +
+    geom_col() +
+    facet_grid(vars(run), vars(ic), labeller = labeller(run = p_dict)) +
+    scale_fill_gradient2(low = muted("blue"), mid = "white", high = muted("red"), 
+                         name = "Loading") +
+    xlim(-0.6, 0.6) +
+    xlab("Loading") +
+    ylab("Variable") +
+    theme(text = element_text(size = 22, family = "serif"),
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          axis.text.y = element_text(size = 5))
+  
+  print(g)
+}
+```
+
+Plot a mixing matrix with the general component and the lethargy component next to each other.
+
+```{r fig.height=10}
+library(ggh4x)
+
+cols <- c("lightcoral", "aquamarine3", "turquoise4", "sienna", "darkorange3", 
+          "tan1", "indianred3", "steelblue")
+
+n_ics <- 5
+
+# Custom annotation function
+ann <- function(grob,
+                xmin = -Inf, xmax = Inf,
+                ymin = -Inf, ymax = Inf,
+                data) {
+  layer(data = data, stat = StatIdentity, position = PositionIdentity,
+        geom = ggplot2:::GeomCustomAnn,
+        inherit.aes = TRUE, params = list(grob = grob,
+                                          xmin = xmin, xmax = xmax,
+                                          ymin = ymin, ymax = ymax))
+}
+
+A <- icas_frag[[6]]$A
+mix_df_general <- data.frame(A) %>%
+  rename_with(function(x) mat_names) %>%
+  add_column(ic = paste("IC", 1:nrow(A)), .before = 1) %>%
+  pivot_longer(!ic, names_to = "variable", values_to = "loading") %>%
+  mutate( # Add some questionnaire grouping information.
+    questionnaire = case_when(
+      str_starts(variable, "ASIQ") ~ "ASIQ",
+      variable == "belonging_" ~ "INQ",
+      str_starts(variable, "BAM") ~ "BAM",
+      str_starts(variable, "BITe") ~ "BITe",
+      str_starts(variable, "DRSP") ~ "DRSP",
+      variable == "mastery" | variable == "wishsleep" | variable == "wantedkill" ~ "Misc",
+      variable == "PANAS_happy"  ~ "PANAS"
+    ),
+    variable = var_dict[variable],
+    variable = fct_rev(factor(variable, var_dict, ordered = TRUE)),
+    variable_code = as.numeric(variable),
+    class = "General affect"
+  )
+
+A <- icas_frag[[11]]$A
+mix_df_lethargy <- data.frame(A) %>%
+  rename_with(function(x) mat_names) %>%
+  add_column(ic = paste("IC", 1:nrow(A)), .before = 1) %>%
+  pivot_longer(!ic, names_to = "variable", values_to = "loading") %>%
+  mutate( # Add some questionnaire grouping information.
+    questionnaire = case_when(
+      str_starts(variable, "ASIQ") ~ "ASIQ",
+      variable == "belonging_" ~ "INQ",
+      str_starts(variable, "BAM") ~ "BAM",
+      str_starts(variable, "BITe") ~ "BITe",
+      str_starts(variable, "DRSP") ~ "DRSP",
+      variable == "mastery" | variable == "wishsleep" | variable == "wantedkill" ~ "Misc",
+      variable == "PANAS_happy"  ~ "PANAS"
+    ),
+    variable = var_dict[variable],
+    variable = fct_rev(factor(variable, var_dict, ordered = TRUE)),
+    variable_code = as.numeric(variable),
+    class = "Lethargy"
+  )
+
+mix_df <- rbind(mix_df_general, mix_df_lethargy)
+
+separator_df <- filter(mix_df, class == "General affect", ic == "IC 5")
+
+ggplot(mix_df, aes(loading, 
+                   variable_code, 
+                   fill = questionnaire, 
+                   alpha = abs(loading))) +
+  # annotate(geom = "rect", xmin = -0.5, xmax = 0.5, ymin = 0.5, ymax = 9.5, fill = alpha("steelblue", 0.5)) + 
+  # annotate(geom = "tile", x = 0, y = 11, width = 1, height = 3, fill = alpha("sienna", 0.5)) + 
+  geom_col(aes(group = questionnaire), orientation = "y") +
+  # geom_vline(aes(xintercept = x), data = separator_df) +
+  ann(linesGrob(gp = gpar(col = "grey50", lwd = 1.5)), xmin = 0.71, xmax = 0.71, ymin = -1, ymax = 37.5, data = separator_df) +
+  facet_nested(~ class + ic) +
+  scale_y_continuous(breaks = 1:max(mix_df$variable_code), 
+                     labels = levels(mix_df$variable)) +
+  scale_fill_manual(values = cols, name = "Questionnaire") +
+  scale_alpha_continuous(guide = "none") +
+  xlim(-0.6, 0.6) +
+  xlab("Loading") +
+  ylab("Variable") +
+  coord_cartesian(clip = "off") +
+  theme(text = element_text(size = 22),
+        axis.text.x = element_text(size = 14, angle = 90, vjust = 0.5, hjust = 1),
+        # axis.text.y = element_blank(),
+        axis.text.y = element_text(size = 10, margin = margin(0, 0, 0, 0)),
+        axis.ticks.y = element_blank(),
+        plot.margin = unit(c(1, 1, 1, 1), "lines"),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "lightgrey"),
+        strip.background = element_rect("white"),
+        ggh4x.facet.nestline = element_line(color = "grey50"))
+
+ggsave(file.path(man_img_dir, "mixing_matrix_classes_frag.pdf"),
+       width = 15, height = 10)
+```
+
+
+# Mean-centered
+
+```{r fig.height=10}
+ls <- replicate_icas(file.path(dat_dir, "dat_reg_fragmented.rds"), 
+                     sub_norm = TRUE)
+icas_cent <- ls$icas
+subs_cent <- ls$subs
+dates_cent <- ls$dates
+
+fancy_mix_fig(icas_cent[[2]], 
+              save_path = file.path(man_img_dir, "mixing_matrix_mean_centred.pdf"))
+```
+
+Use `sens_helper.R` to get `general_idx_cent`.
+
+```{r}
+general_idx_cent <- readRDS(file.path(dat_dir, "general_idx_cent.rds"))
+general_idx_cent <- as.integer(general_idx_cent)
+
+dats_c_cent <- prep_reg_dat(file.path(dat_dir, "dat_reg_fragmented.rds"),
+                            icas_cent, subs_cent, dates_cent,
+                            general_idx_cent)
+
+models_cent <- lapply(dats_c_cent, function(dat_c) {
+  lme(X ~ medianIKD +
+        percent95IKD +
+        madIKD +
+        autocorrectRate +
+        backspaceRate +
+        totalKeyPresses +
+        active +
+        upright,
+      random = ~ 1 | subject / week,
+      data = dat_c)
+})
+
+p_vals_cent <- sapply(models_cent, function(m) {
+  summary(m)$tTable[,5]
+})
+
+p_val_df_cent <- data.frame(t(p_vals_cent)) %>%
+  pivot_longer(everything(), names_to = "variable") %>%
+  filter(variable != "X.Intercept.")
+```
+
+```{r fig.height=10}
+ggplot(p_val_df_cent, aes(value)) +
+  geom_histogram(bins = 60) +
+  facet_wrap(~ variable, scales = "free_x", labeller = as_labeller(c(
+    medianIKD = "Median IKD",
+    percent95IKD = "95th percentile IKD",
+    madIKD = "MAD IKD",
+    autocorrectRate = "Autocorrect rate",
+    backspaceRate = "Backspace rate",
+    totalKeyPresses = "Total number of key presses",
+    active = "Movement rate",
+    upright = "Upright rate"
+  ))) +
+  ylab("Count") +
+  xlab("p value") +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 14, family = "serif"),
+    strip.text = element_text(size = 14, family = "serif"),
+    panel.border = element_rect(fill = NA, color = "grey")
+  )
+```
+
+```{r}
+mean(p_val_df_cent[p_val_df_cent$variable == "active",]$value * 5 * 8 < 0.05)
+```
+
+```{r}
+dat_reg_frag <- readRDS(file.path(dat_dir, "dat_reg_fragmented.rds"))
+ica <- icas_cent[[2]]
+  
+dat_bi_frag <- dat_reg_frag %>%
+  filter(modality == "biaffect") %>%
+  select(!c(study_start_date, treatment_start_date, modality)) %>%
+  pivot_wider(names_from = variable, values_from = value) %>%
+  select(!partition_idx)
+
+dat_joined_cent <- data.frame(ica$S) %>%
+  add_column(subject = subs_cent, date = dates_cent) %>%
+  inner_join(dat_bi_frag, by = c("subject", "date")) %>%
+  mutate(
+    week = week(date),
+    sub_week = paste(subject, week, sep = " - ") # For convenience
+  ) %>%
+  relocate(subject, date, week, sub_week, .before = X1) %>%
+  group_by(sub_week) %>%
+  filter(n() > 1) %>%
+  ungroup() %>%
+  mutate(
+    totalKeyPresses = log(totalKeyPresses),
+    across(medianIKD:mean_accuracy, scale)
+  )
+
+dat_joined_cent
+```
+
+```{r}
+m5.cent.X1.nlme <- lme(X1 ~ medianIKD +
+                         percent95IKD +
+                         madIKD +
+                         autocorrectRate +
+                         backspaceRate +
+                         totalKeyPresses +
+                         active +
+                         upright,
+                       random = ~ 1 | subject / week,
+                       data = dat_joined_cent)
+
+m5.cent.all.nlme <- dat_joined_cent %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(update(m5.cent.X1.nlme, 
+                                 reformulate(".", cur_column())))))
+```
+
+```{r paged.print=FALSE}
+lapply(m5.cent.all.nlme, function(m) summary(m[[1]]))
+```
+

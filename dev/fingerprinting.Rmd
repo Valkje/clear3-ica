@@ -1,0 +1,1029 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+local <- TRUE
+
+wd <- ""
+
+if (!local) {
+  # Cluster environment
+  wd <- "~/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
+} else {
+  wd <- "~/HPC/Documents/Autocorrelation"
+  # Base directory for the data set we will create
+  dat_dir <- "~/HPC_project/data"
+}
+
+# For some reason this sets the pwd only for the current scope, which means it 
+# does not affect anything outside an if block if you set it there.
+# So that's why it's here instead of above.
+setwd(wd) 
+
+source("src/load_dependencies.R")
+```
+
+# Calculate partitions
+
+## Per day
+
+```{r}
+ls <- get_partitions(dat_dir)
+
+subjects <- ls$dat$subjects
+dats_kp <- ls$dat$dats_kp
+dats_ses <- ls$dat$dats_ses
+xBreaks <- ls$breaks$xBreaks
+yBreaks <- ls$breaks$yBreaks
+subject_mats <- ls$subject_mats
+```
+
+In case I don't want to load the key press data itself (can take quite long over Wi-Fi).
+
+```{r}
+ls <- load_subject_key_data(dat_dir, load_kp = FALSE)
+subjects <- ls$subjects
+```
+
+```{r}
+subject_mats <- calc_partitions(dats_kp, 
+                                list(xBreaks = xBreaks, yBreaks = yBreaks), 
+                                date)
+```
+
+## Per week
+
+```{r}
+ls <- get_partitions(dat_dir, week)
+subjects <- ls$dat$subjects
+dats_kp <- ls$dat$dats_kp
+dats_ses <- ls$dat$dats_ses
+xBreaks <- ls$breaks$xBreaks
+yBreaks <- ls$breaks$yBreaks
+subject_mats <- ls$subject_mats
+```
+
+```{r}
+saveRDS(subject_mats, file.path(dat_dir, "weekly_subject_mats.rds"))
+```
+
+
+# Between-subjects fingerprinting
+
+Note: This section is unlikely to work (since `dists` and `ikds` are currently calculated elsewhere), but is kept here for archival purposes.
+
+```{r}
+predict <- function(xHists, yHists) {
+  y_pred <- vector(mode = "integer", length(xHists))
+  
+  for (i in 1:length(xHists)) {
+    # Flatten histogram that should be tested
+    x <- as.vector(xHists[[i]])
+    
+    # Try to find the correct match in yHists
+    rs <- map(yHists, function(hist) {
+      cor(x, as.vector(hist))
+    })
+    
+    y_pred[i] <- which.max(rs)
+  }
+  
+  y_pred
+}
+```
+
+```{r}
+split_prop <- 0.1
+
+hists1 <- map2(dists, ikds, function(dists, ikds) {
+  split_idx <- as.integer(split_prop * length(dists))
+  binCounts(dists[1:split_idx], ikds[1:split_idx], xBreaks, yBreaks)
+})
+
+hists2 <- map2(dists, ikds, function(dists, ikds) {
+  len <- length(dists)
+  split_idx <- as.integer(split_prop * len)
+  binCounts(dists[(split_idx+1):len], ikds[(split_idx+1):len], xBreaks, yBreaks)
+})
+```
+
+Calculate individual identification accuracy:
+
+```{r}
+y <- 1:length(hists1)
+y_pred <- predict(hists1, hists2)
+
+mean(y_pred == y)
+```
+
+```{r}
+split_props <- seq(0.001, 0.999, by = 0.001)
+# We will compare part 1 vs part 2 and vice versa, so we need a vector of a 
+# length that is twice the number of splits
+n_splits <- 2 * length(split_props)
+iids <- vector(mode = "numeric", n_splits)
+
+y <- 1:length(dists)
+# Holds all the predicted labels
+n_subjects <- length(dists)
+y_preds <- vector(mode = "integer", n_splits * n_subjects)
+y_preds <- -1 # for testing
+
+pb <- txtProgressBar(0, length(split_props), style = 3)
+
+for (i in 1:length(split_props)) {
+  setTxtProgressBar(pb, i)
+  
+  split_prop <- split_props[i]
+  
+  # Calculate histogram of first part
+  hists1 <- map2(dists, ikds, function(dists, ikds) {
+    split_idx <- as.integer(split_prop * length(dists))
+    binCounts(dists[1:split_idx], ikds[1:split_idx], xBreaks, yBreaks)
+  })
+  
+  # Calculate histogram of second part
+  hists2 <- map2(dists, ikds, function(dists, ikds) {
+    len <- length(dists)
+    split_idx <- as.integer(split_prop * len)
+    binCounts(dists[(split_idx+1):len], ikds[(split_idx+1):len], xBreaks, yBreaks)
+  })
+  
+  y_pred <- predict(hists1, hists2)
+  y_preds[(2 * n_subjects * (i - 1) + 1):(2 * n_subjects * i - n_subjects)] <- y_pred
+  iids[2*i - 1] <- mean(y_pred == y)
+  
+  y_pred <- predict(hists2, hists1)
+  y_preds[(2 * n_subjects * i - n_subjects + 1):(2 * n_subjects * i)] <- y_pred
+  iids[2*i] <- mean(y_pred == y)
+}
+
+close(pb)
+
+mean(iids)
+```
+
+```{r}
+accs <- y_preds == rep(y, n_splits)
+accs_mat <- matrix(accs, ncol = n_subjects, byrow = TRUE)
+colMeans(accs_mat)
+```
+
+# Within-subjects fingerprinting
+
+```{r}
+load("data/sub-3009/preproc/sub-3009_preprocessed.rda")
+```
+
+
+```{r}
+dat_kp_alphanum <- dat_kp %>%
+    filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+
+calcCor <- function(hist, lagged_hist) {
+  if (is.null(lagged_hist))
+    return(NA)
+  
+  cor(as.vector(hist), as.vector(lagged_hist))
+}
+
+dat_day <- dat_kp_alphanum %>%
+  group_by(
+    date = as_date(sessionTimestampLocal)
+  ) %>%
+  nest() %>%
+  mutate(
+    numberOfKeyPresses = nrow(data[[1]]),
+    hist = map(data, function(df) {
+      as.matrix(bin2d(df$distanceFromPrevious, df$IKD, 100)$counts)
+    })
+  ) %>%
+  ungroup() %>%
+  mutate(
+    cor = map2_dbl(hist, lag(hist), calcCor)
+  )
+
+dat_day
+```
+
+```{r}
+for (i in 1:10) {
+  hist <- dat_day[i,]$hist
+  
+  g <- ggplot(melt(hist)) +
+    geom_raster(aes(X1, X2, fill = log(value))) +
+    theme(text = element_text(size=12),
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  
+  print(g)
+}
+```
+
+```{r}
+with(dat_day, {
+  plot(numberOfKeyPresses, cor)
+})
+```
+
+```{r fig.height=8}
+ggplot(dat_day, aes(date, cor)) +
+  geom_point() +
+  geom_line(group = 1) +
+  ylim(0, 1) +
+  theme(text = element_text(size=12),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+all_rep_dat <- read_sav("../CLEAR3_Biaffect_Leow/2022-08-01 - Daily Dataset/clear3daily_20220801.sav")
+all_rep_dat <- zap_labels(all_rep_dat)
+all_rep_dat
+```
+
+```{r}
+# Replace NAs in partially complete cases
+repl_part_comp <- function(col, value, ...) {
+  other_cols <- list(...)
+  
+  case_when(
+    is.na(col) & !all(sapply(other_cols, is.na)) ~ value,
+    TRUE ~ col
+  )
+}
+
+dat_rep_cleaned <- dat_rep %>%
+  select(!c(id, posLHtoday, medchange_notes, medchange_notes_1_TEXT, 
+            usedPRN_1_TEXT, smokingTHCyn_2_1, vapeTHCyn_2_1, edibleTHCyn_2_1,
+            OtherTHCyn_2_1, CBDyn_2_1, recdrugs_yn_1_TEXT, Computer_date)) %>%
+  mutate(
+    mhpYN_0 = repl_part_comp(mhpYN_0, value = as.integer(0), mhpYN_1, mhpYN_2),
+    mhpYN_1 = repl_part_comp(mhpYN_1, value = as.integer(0), mhpYN_0, mhpYN_2),
+    mhpYN_2 = repl_part_comp(mhpYN_2, value = as.integer(0), mhpYN_0, mhpYN_1),
+    smokingTHCyn_1 = repl_part_comp(smokingTHCyn_1, as.integer(1), MJuse),
+    vapeTHCyn_1 = repl_part_comp(vapeTHCyn_1, as.integer(1), MJuse),
+    edibleTHCyn_1 = repl_part_comp(edibleTHCyn_1, as.integer(1), MJuse),
+    OtherTHCyn_1 = repl_part_comp(OtherTHCyn_1, as.integer(1), MJuse),
+    CBDyn_1 = repl_part_comp(CBDyn_1, as.integer(1), MJuse),
+    firstdayofperiod = replace_na(firstdayofperiod, 0), # Assumes NAs are not actually missing
+    workday = factor(workday)
+  )
+
+# Create replacement vector based on column names
+rep_names <- na.omit(str_extract(colnames(dat_rep_cleaned), "stress_[0-9]+"))
+rep_list <- as.list(setNames(rep(0, length(rep_names)), rep_names))
+dat_rep_cleaned <- dat_rep_cleaned %>% 
+  replace_na(rep_list)
+
+# Now trim down heavily on the number of columns, try to summarize where possible
+# dat_rep_cleaned %>%
+#   mutate(nStressors = sum(stress_1, stress_2, stress_3, stress_4, stress_5,
+#                           stress_6, stress_7, stress_8, stress_9, stress_10,
+#                           stress_11, stress_12, stress_13, stress_14, 
+#                           stress_15)) %>%
+#   select(menstrualbleeding, firstdayofperiod, numdrinks_yest, workday, 
+#          sleepdur_yest, SleepLNQuality, physicalpain, physicaltension,) # Determine which variables you want to use
+
+dat_rep_cleaned
+```
+
+
+```{r}
+dat_rep_cor <- dat_day %>%
+  full_join(dat_rep, c("date" = "daterated"))
+
+dat_rep_cor
+```
+
+Last row for subject 3009 contains a date almost a year later. For now we will just exclude it.
+
+```{r}
+if (dat_kp$userID[1] == 3009)
+  dat_rep_cor <- dat_rep_cor[1:(nrow(dat_rep_cor)-1),]
+```
+
+```{r}
+dat_rep_cor <- dat_rep_cor %>%
+  mutate(
+    dPMDD_mean = c(NA, diff(PMDDemosx_mean)),
+    dIrritability_mean = c(NA, diff(irritability_mean)),
+    dSuicidality_mean = c(NA, diff(suicidality_mean)),
+    dPANAS_happy = c(NA, diff(PANAS_happy))
+  )
+```
+
+
+```{r fig.height=8}
+ggplot(dat_rep_cor, aes(cor, sleepdur_yest)) +
+  geom_point()
+
+ggplot(dat_rep_cor, aes(cor, numberOfKeyPresses)) +
+  geom_point()
+
+ggplot(dat_rep_cor, aes(cor, dPMDD_mean)) +
+  geom_point()
+
+ggplot(dat_rep_cor, aes(cor, dIrritability_mean)) +
+  geom_point()
+
+ggplot(dat_rep_cor, aes(cor, dSuicidality_mean)) +
+  geom_point()
+
+ggplot(dat_rep_cor, aes(cor, dPANAS_happy)) +
+  geom_point()
+```
+
+```{r}
+m1 <- lm(cor ~ dPMDD_mean + dIrritability_mean + dSuicidality_mean + numberOfKeyPresses, data = dat_rep_cor)
+summary(m1)
+```
+
+```{r}
+m2 <- lm(dPMDD_mean ~ cor, data = dat_rep_cor)
+summary(m2)
+```
+
+# Time-dependent identification accuracy
+
+Find appropriate data partitions for all subjects (consider thinning, preserve dates)
+
+Iterate across subjects
+  Iterate across partitions
+   Calculate correlations between source partition and all other partitions
+   Run competition to find identification accuracy
+
+```{r}
+n_sub <- length(subjects)
+```
+
+Partition strategy: Allocate all key presses to their respective dates, then select `n` chunks (i.e. partitions) of days' worth of data. Preferably, these chunks should be about equally sized (where we currently define size as the number of days in that chunk). They should also have some space between them, to reduce short-term autocorrelation influences. Let's make the inter-chunk space as big as the chunks themselves, which means we need to partition the data into `2 * n - 1` chunks and select every odd chunk.
+
+Note: For now we define chunk/partition size by the number of days, but should be aware of the fact that the correlation between histograms greatly depends on the number of data that were fed into the histogram, so perhaps size should be defined as the total number of key presses contained within a chunk.
+
+```{r}
+n_parts <- 10
+# List of partition data frames for all subjects
+sub_partitions <- vector("list", n_sub)
+
+for (i in 1:n_sub) {
+  sub <- subjects[i]
+  
+  print(str_glue("Working on subject {sub}..."))
+  
+  if (.Platform$OS.type == "unix") {
+    dat_kp <- dats_kp[[i]]
+  } else {
+    preproc_path <- preproc_paths[i]
+    load(file.path(preproc_path, str_glue("sub-{sub}_preprocessed.rda")))
+  }
+  
+  dat_kp_alphanum <- dat_kp %>%
+      filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+  
+  dat_kp_alphanum <- dat_kp_alphanum %>%
+    mutate(date = date(keypressTimestampLocal))
+  n_days <- n_distinct(dat_kp_alphanum$date)
+  
+  sub_partitions[[i]] <- dat_kp_alphanum %>%
+    group_by(date) %>%
+    mutate(
+      day_number = cur_group_id(),
+      # Account for the fact that we want these numbers to range from 1 (rather than 0) to 2n-1, and that we use rounding
+      chunk_number = round(day_number / n_days * (2 * n_parts - 1.001) + 0.5) 
+    ) %>%
+    filter(chunk_number %% 2 == 1) %>%
+    group_by(chunk_number) %>%
+    nest() %>%
+    mutate(
+      numberOfKeyPresses = nrow(data[[1]]),
+      hist = map(data, function(df) {
+        binCounts(df$distanceFromPrevious, df$IKD, xBreaks, yBreaks)
+      })
+    )
+}
+```
+
+```{r}
+sub_mats <- lapply(sub_partitions, function(df) {
+  df$hist
+})
+```
+
+
+```{r}
+tdia <- matrix(nrow = n_sub, ncol = n_parts)
+
+pb <- txtProgressBar(max = n_sub * n_parts, style = 3)
+
+# For vapply
+templ <- vector("numeric", n_parts)
+
+for (i in 1:n_sub) {
+  sub <- subjects[i]
+  # print(str_glue("Working on subject {sub}..."))
+  
+  for (j in 1:n_parts) {
+    setTxtProgressBar(pb, (i - 1) * n_parts + j)
+    
+    source <- sub_mats[[i]][[j]]
+        
+    # Of the shape [n_parts] x [n_sub]
+    cors <- vapply(sub_mats, function(mats) {
+      # For every (other) subject...
+      vapply(mats, function(mat) {
+        # For every partition of that subject...
+        cor(as.vector(source), as.vector(mat))
+      }, FUN.VALUE = 0.5)
+    }, FUN.VALUE = templ)
+    
+    # Select the n_parts highest correlations (the first one will be the
+    # correlation of source with itself)
+    lowest_top <- sort(cors, decreasing = TRUE)[n_parts]
+    match_idx <- which(cors >= lowest_top, arr.ind = TRUE)
+    tdia[i, j] <- (sum(match_idx[,2] == i) - 1) / (n_parts - 1)
+  }
+}
+
+close(pb)
+```
+
+```{r}
+i <- 1 # subject
+j <- 2 # partition
+
+source <- sub_mats[[i]][[j]]
+
+# For vapply
+templ <- vector("numeric", n_parts)
+    
+# Of the shape [n_parts] x [n_sub]
+cors <- vapply(sub_mats, function(mats) {
+  # For every (other) subject...
+  vapply(mats, function(mat) {
+    # For every partition of that subject...
+    cor(as.vector(source), as.vector(mat))
+  }, FUN.VALUE = 0.5)
+}, FUN.VALUE = templ)
+
+# Select the n_parts highest correlations (the first one will be the
+# correlation of source with itself)
+lowest_top <- sort(cors, decreasing = TRUE)[n_parts]
+match_idx <- which(cors >= lowest_top, arr.ind = TRUE)
+tdia <- (sum(match_idx[,2] == i) - 1) / (n_parts - 1)
+tdia
+```
+
+```{r}
+tdia
+```
+
+```{r}
+hist(rowMeans(tdia), main = "Histogram of subject-averaged TDIA", 
+     xlab = "Subject-averaged TDIA")
+rowMeans(tdia)
+```
+
+
+```{r}
+print((n_parts - 1) / (n_sub * n_parts - 1))
+mean(tdia)
+```
+
+```{r}
+df <- data.frame(tdia, row.names = subjects)
+colnames(df) <- 1:10
+df <- rownames_to_column(df, "subject")
+df <- melt(df, id.vars = "subject", variable_name = "partition")
+
+ggplot(df, aes(partition, value)) +
+  geom_line(aes(group = subject, color = subject)) +
+  ylab("time-dependent identification accuracy")
+```
+
+## With bootstrapping
+
+The partition strategy is much simpler here: We just partition all data per day. Resampling will take care of the resulting class imbalance. We might still need to think about how we want to tackle autocorrelation, however.
+
+```{r}
+n_sub <- length(subjects)
+
+# List of partition data frames for all subjects
+subject_partitions <- vector("list", n_sub)
+
+for (i in 1:n_sub) {
+  sub <- subjects[i]
+  
+  print(str_glue("Working on subject {sub}..."))
+  
+  if (.Platform$OS.type == "unix") {
+    dat_kp <- dats_kp[[i]]
+  } else {
+    preproc_path <- preproc_paths[i]
+    load(file.path(preproc_path, str_glue("sub-{sub}_preprocessed.rda")))
+  }
+  
+  dat_kp_alphanum <- dat_kp %>%
+      filter(keypress_type == "alphanum", previousKeyType == "alphanum")
+  
+  dat_kp_alphanum <- dat_kp_alphanum %>%
+    mutate(date = date(keypressTimestampLocal))
+  n_days <- n_distinct(dat_kp_alphanum$date)
+  
+  subject_partitions[[i]] <- dat_kp_alphanum %>%
+    group_by(date) %>%
+    nest() %>%
+    mutate(
+      numberOfKeyPresses = nrow(data[[1]]),
+      hist = map(data, function(df) {
+        binCounts(df$distanceFromPrevious, df$IKD, xBreaks, yBreaks)
+      })
+    )
+}
+
+subject_mats <- lapply(subject_partitions, function(df) {
+  df$hist
+})
+```
+
+```{r}
+n_parts <- 10
+
+# Useful for later reference
+sampled_idx <- lapply(lapply(subject_mats, length), sample.int, n_parts, TRUE)
+# Subsampled matrices (with replacement)
+sub_mats <- map2(subject_mats, sampled_idx, ~ .x[.y])
+```
+
+We need to calculate the TDIA `n_iterations` (e.g. 1000) number of times. This can become quite costly, so it might be wise to reduce the number of partitions `n_parts` used in each iteration (to e.g. 5) and look for optimisation opportunities.
+
+```{r}
+# Every (unique) pair of coordinate pairs represents an edge, and for every edge 
+# we need to compute a correlation
+
+# A coordinate pair [e.g. (i, j)] can also be represented as a single number,
+# i.e. (i - 1) * n_parts + j. To create pairs of coordinate pairs, we can create
+# pairs of these single numbers instead.
+n_mats <- n_sub * n_parts
+coords <- 1:n_mats
+
+cors <- matrix(0, n_mats, n_mats)
+
+# These loops will fill only the upper diagonal part of cors
+for (x in coords) {
+  for (y in x:n_mats) {
+    if (x == y)
+      next
+    
+    # Use integer division and the modulo operator to get (i, j) coordinates
+    cors[x, y] <- cor(
+      as.vector(sub_mats[[(x-1) %/% n_parts + 1]][[(x-1) %% n_parts + 1]]),
+      as.vector(sub_mats[[(y-1) %/% n_parts + 1]][[(y-1) %% n_parts + 1]])
+    )
+  }
+}
+
+# Correlation matrices are symmetric
+cors <- cors + t(cors)
+# We already know the diagonal should be all ones
+diag(cors) <- 1
+```
+
+
+Perhaps we can do this in one fell swoop by converting every matrix to a column vector, concatenating all column vectors into a matrix, and call `cor` on that matrix. *Edit*: Indeed, produces the same output as the code block above and is quite a bit faster.
+
+```{r}
+# Produces a 10000*n_parts*n_sub array
+mat <- sapply(sub_mats, function(mats) sapply(mats, as.vector), 
+              simplify = "array")
+# Reshape to 2D array
+dim(mat) <- c(100*100, n_parts*n_sub)
+cors <- cor(mat)
+```
+
+
+Now we need to go over every matrix (source), get the correlations between the source matrix and all other matrices, and determine whether the `n_parts - 1` matrices with the highest correlations are from the same subject.
+
+```{r}
+tdia <- matrix(nrow = n_sub, ncol = n_parts)
+
+for (x in coords) {
+  # Select the n_parts highest correlations (the first one will be the
+  # correlation of source with itself)
+  lowest_top <- sort(cors[x,], decreasing = TRUE)[n_parts]
+  match_idx <- which(cors[x,] >= lowest_top, arr.ind = TRUE)
+  
+  # Get subject index from x (calculate row number of the n_sub*n_parts matrix) 
+  # and match_idx (also row number of that matrix)
+  sub_idx <- (x-1) %/% n_parts + 1
+  match_idx <- (match_idx-1) %/% n_parts + 1
+  
+  part_idx <- (x-1) %% n_parts + 1
+  # Subtract one from the match count to disregard the match of the source
+  # matrix with itself
+  tdia[sub_idx, part_idx] <- (sum(match_idx == sub_idx) - 1) / (n_parts - 1)
+}
+
+mean(tdia)
+```
+
+Putting the thing into a function:
+
+```{r}
+subsampled_tdia <- function(subject_mats, n_parts) {
+  n_sub <- length(subject_mats)
+  
+  # Subsampled matrices (with replacement)
+  sub_mats <- lapply(subject_mats, sample, n_parts, TRUE)
+  
+  # Every (unique) pair of matrices represents an edge, and for every edge 
+  # we need to compute a correlation
+  
+  # A coordinate pair [e.g. (i, j)] can also be represented as a single number,
+  # i.e. (i - 1) * n_parts + j. To create pairs of coordinate pairs, we can create
+  # pairs of these single numbers instead.
+  n_mats <- n_sub * n_parts
+  coords <- 1:n_mats
+  
+  # Produces a 10000*n_parts*n_sub array
+  mat <- sapply(sub_mats, function(mats) sapply(mats, as.vector), 
+                simplify = "array")
+  dim(mat) <- c(100*100, n_parts*n_sub)
+  cors <- cor(mat)
+  
+  tdia <- matrix(nrow = n_sub, ncol = n_parts)
+
+  for (x in coords) {
+    # Select the n_parts highest correlations (the first one will be the
+    # correlation of source with itself)
+    lowest_top <- sort(cors[x,], decreasing = TRUE)[n_parts]
+    match_idx <- which(cors[x,] >= lowest_top, arr.ind = TRUE)
+    
+    # Get subject index from x (calculate row number of the n_sub*n_parts matrix) 
+    # and match_idx (also row number of that matrix)
+    sub_idx <- (x-1) %/% n_parts + 1
+    match_idx <- (match_idx-1) %/% n_parts + 1
+    
+    part_idx <- (x-1) %% n_parts + 1
+    # Subtract one from the match count to disregard the match of the source
+    # matrix with itself
+    tdia[sub_idx, part_idx] <- (sum(match_idx == sub_idx) - 1) / (n_parts - 1)
+  }
+  
+  tdia
+}
+```
+
+```{r}
+mean(subsampled_tdia(subject_mats, n_parts))
+```
+
+Running the bootstrap with parallelization:
+
+```{r}
+n_threads <- 8
+n_iter <- 100
+
+start <- Sys.time()
+
+tdias <- mclapply(1:n_iter, function(iter) {
+  subsampled_tdia(subject_mats, n_parts)
+}, mc.cores = n_threads)
+
+print(Sys.time() - start)
+```
+
+```{r}
+cl <- makeCluster(n_threads)
+clusterSetRNGStream(cl, NULL) # Make sure every thread uses a different RNG stream
+
+clusterExport(cl, c("subsampled_tdia", "subject_mats", "n_parts"))
+
+f <- function(iter) {
+  subsampled_tdia(subject_mats, n_parts)
+}
+
+start <- Sys.time()
+
+res <- parSapply(cl, 1:n_iter, f)
+
+print(Sys.time() - start)
+
+stopCluster(cl)
+```
+
+```{r}
+start <- Sys.time()
+
+res2 <- array(dim = c(n_iter, n_sub, n_parts))
+
+for (i in 1:n_iter) {
+  res2[i,,] <- subsampled_tdia(subject_mats, n_parts)
+}
+
+print(Sys.time() - start)
+```
+
+
+```{r}
+bm <- microbenchmark(subsampled_tdia(subject_mats, n_parts), times = 10)
+bm
+```
+
+# Examining bootstrapped tdias
+
+```{r}
+tdias_10_summ <- summarize_tdias(file.path(dat_dir, "tdias.rda"), n_parts = 10)
+```
+
+```{r fig.height=8}
+sub <- 3100
+gs <- plot_tdia_summ(tdias_10_summ, sub)
+
+ggsave("images/test_tdia/bootstrap_tdia_10_iter_hist.png", gs[[1]], 
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave("images/test_tdia/bootstrap_tdia_10_per_subject.png", gs[[2]], 
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_10_over_partition_sub_{sub}.png"),
+       gs[[3]], dpi = 150, height = 750, width = 1750, units = "px")
+```
+
+
+```{r}
+acc_n_iter <- partition_df %>%
+  group_by(subject, partition_idx) %>%
+  summarize(accuracy = mean(accuracy), n = n())
+
+acc_n_iter
+```
+
+```{r}
+ggplot(acc_n_iter) +
+  geom_point(aes(n, accuracy, color = factor(subject)), alpha = 0.5) +
+  xlab("Number of iterations per partition (higher numbers imply less data)") +
+  ylab("TDIA") +
+  guides(color = "none") +
+  theme_ipsum(base_size = 15, axis_title_size = 15)
+
+# ggsave("images/bootstrap_tdia_partition_scatter.png")
+```
+
+
+```{r fig.height=10, fig.width=18}
+ggplot(acc_n_iter) +
+  geom_point(aes(n, accuracy)) +
+  facet_wrap(vars(subject))
+```
+
+```{r}
+# Bit of a lazy way to determine how many data each subject has, relies on the
+# fact that there is uniform sampling and enough samples
+acc_var_n_parts <- acc_n_iter %>%
+  summarize(n_parts = max(partition_idx)) %>%
+  inner_join(sub_tdia %>%
+               select(subject, average),
+             by = "subject") %>%
+  inner_join(sub_var, by = "subject")
+
+ggplot(acc_var_n_parts, aes(n_parts, average)) +
+  geom_point(color = "steelblue", alpha = 0.8) +
+  xlab("Number of days of data") +
+  ylab("Mean TDIA") +
+  ylim(0, 1) +
+  theme_ipsum(base_size = 15, axis_title_size = 15)
+
+# ggsave("images/bootstrap_scatter_tdia_nData.png")
+```
+
+
+```{r}
+ggplot(acc_var_n_parts, aes(average, variance)) +
+  geom_point(color = "steelblue", alpha = 0.8) +
+  xlab("Mean TDIA") +
+  ylab("Mean variance") +
+  xlim(0, 1) +
+  theme_ipsum(base_size = 15, axis_title_size = 15)
+
+# ggsave("images/bootstrap_scatter_tdia_variance.png")
+```
+
+
+## Permuted
+
+```{r}
+tdias_10_perm_summ <- summarize_tdias(file.path(dat_dir, "tdias_permuted.rda"), 
+                                      n_parts = 10, permuted = TRUE)
+```
+
+```{r fig.height=8}
+gs <- plot_tdia_summ(tdias_10_perm_summ, 3100)
+
+ggsave("images/test_tdia/bootstrap_tdia_10_perm_iter_hist.png", gs[[1]])
+ggsave("images/test_tdia/bootstrap_tdia_10_perm_per_subject.png", gs[[2]], 
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_10_perm_over_partition_sub_{sub}.png"),
+       gs[[3]])
+```
+
+```{r fig.height=8}
+g <- plot_tdia_comp(tdias_10_summ, tdias_10_perm_summ)
+ggsave("images/test_tdia/tdia_10_no-perm_vs_perm_hist.png", g)
+```
+
+```{r fig.height=10, fig.width=20}
+melted_tdia$permuted <- FALSE
+melted_perm_tdia$permuted <- TRUE
+
+melted_all <- rbind(melted_tdia, melted_perm_tdia)
+
+ggplot(melted_all, aes(value, fill = permuted)) +
+  geom_histogram(data = melted_tdia, bins = 100, alpha = 0.5) +
+  geom_histogram(data = melted_perm_tdia, bins = 100, alpha = 0.5) +
+  facet_wrap(vars(subject))
+```
+
+Mean is very close to expected mean of (n_parts - 1) / (n_sub * n_parts - 1) = 0.01768173.
+
+```{r}
+mean(iter_perm_means$iter_mean)
+```
+
+## Blocked
+
+```{r}
+tdias_10_blocked_summ <- summarize_tdias(file.path(dat_dir, "tdias_10_blocked.rda"), 
+                                         n_parts = 10)
+```
+
+```{r fig.height=8}
+gs <- plot_tdia_summ(tdias_10_blocked_summ, 3100)
+
+ggsave("images/test_tdia/bootstrap_tdia_10_blocked_iter_hist.png", gs[[1]], 
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave("images/test_tdia/bootstrap_tdia_10_blocked_per_subject.png", gs[[2]], 
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_10_blocked_over_partition_sub_{sub}.png"),
+       gs[[3]], dpi = 150, height = 750, width = 1750, units = "px")
+```
+
+```{r}
+blocked <- rep(c(FALSE, TRUE), each = nrow(tdias_10_summ$iter_means))
+g <- plot_tdia_comp(tdias_10_summ, tdias_10_blocked_summ, blocked, "Blocked")
+ggsave("images/test_tdia/bootstrap_tdia_10_individual-vs-blocked.png", g,
+       dpi = 150, height = 1250, width = 1750, units = "px")
+```
+
+```{r}
+tdias_10_summ$iter_means %>%
+  add_column(!!column := 3)
+```
+
+
+## 30 partitions - Blocked
+
+```{r}
+tdias_30_blocked_summ <- summarize_tdias(file.path(dat_dir, "tdias_30_blocked.rda"), 
+                                         n_parts = 30)
+```
+
+```{r fig.height=8}
+gs <- plot_tdia_summ(tdias_30_blocked_summ, 3100, subjects)
+
+# ggsave("images/test_tdia/bootstrap_tdia_30_blocked_iter_hist.png", gs[[1]], 
+#        dpi = 150, height = 1500, width = 1250, units = "px")
+# ggsave("images/test_tdia/bootstrap_tdia_30_blocked_per_subject.png", gs[[2]], 
+#        dpi = 150, height = 1500, width = 1250, units = "px")
+# ggsave(str_glue("images/test_tdia/bootstrap_tdia_30_blocked_over_partition_sub_{sub}.png"),
+#        gs[[3]], dpi = 150, height = 750, width = 1750, units = "px")
+```
+
+```{r}
+n_partitions <- rep(c("10", "30"), each = nrow(tdias_10_blocked_summ$iter_means))
+g <- plot_tdia_comp(tdias_10_blocked_summ, tdias_30_blocked_summ, n_partitions, 
+                    "Number of partitions")
+ggsave("images/test_tdia/bootstrap_tdia_10-vs-30_blocked.png", g,
+       dpi = 150, height = 1250, width = 1750, units = "px")
+```
+
+## 10 partitions - Blocked - Permuted
+
+```{r}
+tdias_10_blocked_perm_summ <- summarize_tdias(file.path(
+                                                dat_dir, 
+                                                "tdias_permuted_between.rda"
+                                              ), 
+                                              n_parts = 10,
+                                              permuted = TRUE)
+```
+
+```{r fig.height=8}
+gs <- plot_tdia_summ(tdias_10_blocked_perm_summ, 3100)
+
+ggsave("images/test_tdia/bootstrap_tdia_10_blocked_perm_iter_hist.png", gs[[1]])
+ggsave("images/test_tdia/bootstrap_tdia_10_blocked_perm_per_subject.png", gs[[2]], dpi = 100)
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_10_blocked_perm_over_partition_sub_{sub}.png"),
+       gs[[3]])
+```
+
+## 30 partitions - Blocked - Permuted
+
+```{r}
+tdias_30_blocked_perm_summ <- summarize_tdias(file.path(
+                                                dat_dir, 
+                                                "tdias_30_permuted_blocked.rda"
+                                              ), 
+                                              n_parts = 30,
+                                              permuted = TRUE)
+```
+
+```{r fig.height=8}
+gs <- plot_tdia_summ(tdias_30_blocked_perm_summ, sub)
+
+ggsave("images/test_tdia/bootstrap_tdia_30_blocked_perm_iter_hist.png", gs[[1]],
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave("images/test_tdia/bootstrap_tdia_30_blocked_perm_per_subject.png", gs[[2]], 
+       dpi = 150, height = 1500, width = 1250, units = "px")
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_30_blocked_perm_over_partition_sub_{sub}.png"),
+       gs[[3]], dpi = 150, height = 750, width = 1750, units = "px")
+```
+
+```{r fig.height=8}
+g <- plot_tdia_comp(tdias_30_blocked_summ, tdias_30_blocked_perm_summ)
+ggsave("images/test_tdia/bootstrap_tdia_30_blocked_perm-vs-no-perm_hist.png", g,
+       dpi = 150, height = 1250, width = 1750, units = "px")
+```
+
+## Julia - 30 partitions - Blocked
+
+```{r}
+tdias_julia_30_blocked_summ <- summarize_tdias(file.path(
+                                                 dat_dir, 
+                                                 "tdias_flattened.jld"
+                                               ), 
+                                               n_parts = 30, julia = TRUE)
+```
+
+```{r fig.height=8}
+sub <- 3100
+gs <- plot_tdia_summ(tdias_julia_30_blocked_summ, sub, subjects)
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_julia_30_blocked_over_partition_sub_{sub}.png"),
+       gs[[3]], dpi = 150, height = 750, width = 1750, units = "px")
+```
+
+## Julia - 30 partitions - Blocked - Bound histograms
+
+```{r}
+tdias_jl_30_blck_bnd_summ <- summarize_tdias(file.path(dat_dir, 
+                                                       "tdias_bound_hists.jld"),
+                                             n_parts = 30, julia = TRUE)
+```
+
+```{r fig.height=8}
+sub <- 3100
+gs <- plot_tdia_summ(tdias_jl_30_blck_bnd_summ, sub, subjects)
+ggsave(str_glue("images/test_tdia/bootstrap_tdia_jl_30_blck_bnd_over_partition_sub_{sub}.png"),
+       gs[[3]], dpi = 150, height = 750, width = 1750, units = "px")
+```
+
+```{r}
+extended <- rep(c(FALSE, TRUE), each = nrow(tdias_julia_30_blocked_summ$iter_means))
+g <- plot_tdia_comp(tdias_julia_30_blocked_summ, tdias_jl_30_blck_bnd_summ, extended, "Extended")
+
+ggsave("images/test_tdia/extended_2dhist_histograms.png")
+```
+
+## Julia - 6 partitions - Blocked - Weekly histograms
+
+```{r}
+tdias_jl_6_blck_wkl_summ <- summarize_tdias(file.path(
+                                              dat_dir, 
+                                              "tdias_weekly_mats.jld"
+                                            ), 
+                                            n_parts = 6, julia = TRUE)
+```
+
+```{r fig.height=8}
+sub <- 3100
+gs <- plot_tdia_summ(tdias_jl_6_blck_wkl_summ, sub, subjects)
+```
+
+```{r fig.height=8}
+weekly <- rep(c(FALSE, TRUE), each = nrow(tdias_julia_30_blocked_summ$iter_means))
+g <- plot_tdia_comp(tdias_julia_30_blocked_summ, tdias_jl_6_blck_wkl_summ, weekly, "Weekly")
+```
+
+```{r fig.height=8}
+g1 <- plot_tdia_summ(tdias_julia_30_blocked_summ, sub, subjects, print_plots = FALSE)[[2]]
+g2 <- plot_tdia_summ(tdias_jl_6_blck_wkl_summ, sub, subjects, print_plots = FALSE)[[2]]
+
+ggarrange(g1, g2, nrow = 2)
+```
+
+Chance accuracy:
+
+```{r}
+(6 - 1) / (51 * (6 - 1))
+```
+
