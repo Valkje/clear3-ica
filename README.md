@@ -1,6 +1,6 @@
 # Data fusion through independent component analysis
 
-Analysis source code accompanying the manuscript 'Smartphone keyboard dynamics predict affect in suicidal ideation'. For a high-level overview of the analysis pipeline, please refer to one of the `pipeline.*` files. Once downloaded and opened in a browser, `pipeline.nb.html` is the easiest to interpret; `pipeline.pdf` contains the same content but in a different format. `pipeline.Rmd` contains the corresponding source code.
+Analysis source code accompanying the manuscript 'Smartphone keyboard dynamics predict affect in suicidal ideation'. For a high-level overview of the analysis pipeline, please refer to one of the `pipeline.*` files. `pipeline.nb.html` displays the result of running the code once the file is downloaded and opened in a browser. `pipeline.Rmd` contains the corresponding source code.
 
 ## Set-up
 
