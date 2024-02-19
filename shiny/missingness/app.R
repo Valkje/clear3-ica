@@ -75,7 +75,7 @@ choices = as.list(dat_cols)
 
 # na_pat_proto <- dat_reg %>%
 #   mutate(across(medianIKD:n_stressors, is.na)) %>%
-#   pivot_longer(medianIKD:n_stressors, "variable", values_to = "missing") %>%
+#   pivot_longer(medianIKD:n_stressors, names_to = "variable", values_to = "missing") %>%
 #   mutate(
 #     present = !missing, # For convenience
 #     modality = case_when(
@@ -252,7 +252,7 @@ server <- function(input, output) {
         TRUE ~ totalKeyPresses
       )) %>%
       mutate(across(medianIKD:mastery, is.na)) %>%
-      pivot_longer(medianIKD:mastery, "variable", values_to = "missing") %>%
+      pivot_longer(medianIKD:mastery, names_to = "variable", values_to = "missing") %>%
       mutate(
         present = !missing, # For convenience
         modality = case_when(
@@ -276,7 +276,8 @@ server <- function(input, output) {
       ) %>%
       group_by(subject, modality) %>%
       summarize(missing = mean(missing)) %>%
-      pivot_wider(subject, names_from = modality, values_from = missing)
+      pivot_wider(id_cols = subject, 
+                  names_from = modality, values_from = missing)
   }) %>%
     bindCache(input$dataset, input$sel_cols)
 
@@ -331,7 +332,7 @@ server <- function(input, output) {
       ungroup() %>%
       # Only include biaffect within good self-report blocks
       select(subject, date, modality, present, good_block) %>%
-      pivot_wider(c(subject, date), names_from = modality,
+      pivot_wider(id_cols = c(subject, date), names_from = modality,
                   values_from = c(present, good_block),
                   names_sep = ".") %>%
       mutate(good_block.biaffect = good_block.biaffect & good_block.self_report) %>%
@@ -344,7 +345,8 @@ server <- function(input, output) {
     ordered_sub_lvls <- na_pat_col_unordered %>%
       group_by(subject, modality) %>%
       summarize(present = mean(present)) %>%
-      pivot_wider(subject, names_from = "modality", values_from = "present") %>%
+      pivot_wider(id_cols = subject, 
+                  names_from = "modality", values_from = "present") %>%
       arrange(.data[[input$order_by]]) %>%
       select(subject)
 
@@ -396,7 +398,7 @@ server <- function(input, output) {
   output$table_one <- renderDT({
     dat() %>%
       filter(!(subject %in% bad_subs())) %>%
-      pivot_longer(where(is.numeric), "variable") %>%
+      pivot_longer(where(is.numeric), names_to = "variable") %>%
       group_by(variable) %>%
       summarize(
         n = n(),
@@ -417,7 +419,7 @@ server <- function(input, output) {
   output$histogram <- renderPlot({
     miss_props_long <- miss_props() %>%
       filter(!(subject %in% bad_subs())) %>%
-      pivot_longer(c(biaffect, self_report), "modality", values_to = "miss_prop")
+      pivot_longer(c(biaffect, self_report), names_to = "modality", values_to = "miss_prop")
 
     ggplot(miss_props_long) +
       geom_histogram(aes(miss_prop, fill = modality),
@@ -607,7 +609,7 @@ server <- function(input, output) {
     # Note: We leave this in long format, makes modality selection easier in
     # downstream analyses
     dat <- dat() %>%
-      pivot_longer(medianIKD:mastery, "variable") %>%
+      pivot_longer(medianIKD:mastery, names_to = "variable") %>%
       mutate(
         modality = case_when(
           variable %in% bi_cols ~ "biaffect",
