@@ -21,15 +21,15 @@ if (!local) {
 
 model_dir <- file.path(dat_dir, "complete_data_models")
 
+# For manuscript images
+man_img_dir <- file.path("~/Documents/Writing/Papers/Paper 1/images")
+
 # For some reason this sets the pwd only for the current scope, which means it 
 # does not affect anything outside an if block if you set it there.
 # So that's why it's here instead of above.
 setwd(wd) 
 
 source("src/load_dependencies.R")
-
-# Because it's required by the Lancet
-options(OutDec = "·")
 ```
 
 # Set apart a portion of the data as validation set
@@ -1609,6 +1609,66 @@ dates <- ls$dates
 dats_c_no_tdia <- ls$dats_c
 ```
 
+```{r}
+no_biaffect <- setdiff(dat_sr$subject, dat_bi$subject)
+saveRDS(no_biaffect, file.path(dat_dir, "participants_without_biaffect.rds"))
+```
+
+
+```{r}
+write_rds(as.integer(unique(dat_sr$subject)), 
+          file.path(dat_dir, "participants_in_ICA.rds"))
+
+write_rds(as.integer(unique(dats_c_no_tdia[[1]]$subject)), 
+          file.path(dat_dir, "participants_in_LMER.rds"))
+```
+
+Histogram of suicidality items:
+
+```{r fig.height=8}
+dat_tmp <- dat_sr %>%
+  select(ASIQ9_wishdead:mastery) %>%
+  pivot_longer(everything(), names_to = "variable")
+
+ggplot(dat_tmp) +
+  geom_histogram(aes(value)) +
+  facet_wrap(~ variable)
+
+ggsave(file.path(man_img_dir, "self-report_hists.png"))
+```
+
+
+```{r}
+dat_asiq <- dat_sr %>%
+  select(starts_with("ASIQ")) %>%
+  pivot_longer(everything(), names_to = "variable")
+
+ggplot(dat_asiq) +
+  geom_histogram(aes(value)) +
+  facet_wrap(~ variable)
+
+ggsave(file.path(man_img_dir, "asiq_hists.png"))
+```
+
+
+Number of observations per participant:
+
+```{r}
+# Data fed to ICA
+dat_sr %>%
+  group_by(subject) %>%
+  summarize(n = n()) %>%
+  summarize(avg = mean(n), sd = sd(n))
+```
+
+```{r}
+# Data fed to mixed-effects models
+dats_c_no_tdia[[1]] %>%
+  group_by(subject) %>%
+  summarize(n = n()) %>%
+  summarize(avg = mean(n), sd = sd(n))
+```
+
 ## 5 components
 
 ```{r}
@@ -1635,6 +1695,15 @@ m5.no_tdia.all.nlme <- dat_c1_no_tdia %>%
 plot_validation(m5.no_tdia.all.nlme)
 ```
 
+```{r paged.print=FALSE}
+lapply(m5.no_tdia.all.nlme, function(m) summary(m[[1]]))
+```
+
+```{r}
+lapply(m5.no_tdia.all.nlme, function(m) intervals(m[[1]]))
+```
+
+
 Forwards-fitting of random effects
 
 ```{r}
@@ -1643,6 +1712,58 @@ lapply(m5.no_tdia.all.nlme, function (m) {
   m.b <- update(m, random = ~ 1 | subject)
   anova(m, m.b)
 })
+```
+
+```{r paged.print=FALSE}
+summary(m5.no_tdia.all.nlme[[2]][[1]])
+```
+
+
+### Within-subject centering
+
+```{r}
+ls <- prep_reg_dat(
+  dat_path = file.path(dat_dir, "dat_reg_fragmented_no-tdia.rds"),
+  ica_path = file.path(dat_dir, "dat_reg_frag_icas_norm.rda")
+)
+
+dat_reg_no_tdia_norm <- ls$dat_reg
+dat_bi <- ls$dat_bi
+dat_sr <- ls$dat_sr
+icas <- ls$icas
+subs <- ls$subs
+dates <- ls$dates
+dats_c_no_tdia_norm <- ls$dats_c
+```
+
+```{r}
+dat_c1_no_tdia_norm <- dats_c_no_tdia_norm[[1]]
+
+m5.no_tdia.norm.X1.nlme <- lme(X1 ~ medianIKD +
+                                 percent95IKD +
+                                 madIKD +
+                                 autocorrectRate +
+                                 backspaceRate +
+                                 totalKeyPresses +
+                                 active +
+                                 upright,
+                               random = ~ 1 | subject / week,
+                               data = dat_c1_no_tdia_norm)
+```
+
+```{r paged.print=FALSE}
+m5.no_tdia.norm.all.nlme <- dat_c1_no_tdia_norm %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(update(m5.no_tdia.norm.X1.nlme, 
+                                 reformulate(".", cur_column())))))
+
+lapply(m5.no_tdia.norm.all.nlme, function(m) summary(m[[1]]))
+```
+
+```{r}
+estimates_to_csv(file.path(dat_dir, "m5_nlme_p_frag_no-tdia_norm.csv"),
+                 m5.no_tdia.norm.all.nlme,
+                 include_corrected = TRUE)
 ```
 
 
