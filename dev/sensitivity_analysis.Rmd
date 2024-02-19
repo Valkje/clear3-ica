@@ -344,8 +344,11 @@ subs_frag <- ls$subs
 dates_frag <- ls$dates
 ```
 
+Intermezzo: Use the first solution with general affect to get model estimates.
+
 ```{r fig.height=10}
 fancy_mix_fig(icas_frag[[1]])
+ggsave("~/Documents/Presentations/2023-11-09 ACNP panel/mixing_matrix_5_frag_general.png")
 ```
 
 Use sens_helper.R to get general_idx_frag.
@@ -379,6 +382,19 @@ p_val_df_frag <- data.frame(t(p_vals_frag)) %>%
   pivot_longer(everything(), names_to = "variable") %>%
   filter(variable != "X.Intercept.")
 ```
+
+```{r paged.print=FALSE}
+summary(models_frag[[1]])
+```
+
+```{r}
+estimates_to_df(list(models_frag[1]), 
+                include_corrected = TRUE, 
+                correctionFactor = 5 * 8)
+```
+
+
+End of intermezzo.
 
 ```{r fig.height=10}
 ggplot(p_val_df_frag, aes(value)) +

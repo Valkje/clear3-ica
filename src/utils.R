@@ -335,13 +335,15 @@ link_tdia_date <- function(tdias, sampled_idx, subjects, dats_kp, weekly) {
   sub_tdia
 }
 
-# Prints relevant model estimates to a neat csv
-estimates_to_csv <- function(
-  file, models, include_corrected = FALSE, transpose = FALSE
+estimates_to_df <- function(
+  models,
+  include_corrected = FALSE,
+  transpose = FALSE,
+  correctionFactor = NULL
 ) {
   terms <- c("medianIKD", "percent95IKD", "madIKD", "autocorrectRate",
              "backspaceRate", "totalKeyPresses", "active", "upright")
-
+  
   labels <- c(
     medianIKD = "Median IKD",
     percent95IKD = "95th percentile IKD",
@@ -352,36 +354,39 @@ estimates_to_csv <- function(
     active = "Movement rate",
     upright = "Upright rate"
   )
-
+  
   n_models <- length(models)
   n_terms <- length(terms)
-
+  
   ests <- lapply(models, function(m) {
     summ <- summary(m[[1]])
     tab <- summ$tTable
-
+    
     betas <- tab[terms, 1]
     p_vals <- tab[terms, 5]
-
+    
     df <- data.frame(b = betas, p_prime = p_vals)
-
+    
     resp_var <- attr(getResponse(m[[1]]), "label")
-
+    
     col_names <- c(paste0(resp_var, ".beta"), paste0(resp_var, ".p'"))
-
+    
     if (include_corrected) {
+      if (is.null(correctionFactor))
+        correctionFactor = n_models * n_terms
+      
       df <- df %>%
-        mutate(p = pmin(1, n_models * n_terms * p_prime))
-
+        mutate(p = pmin(1, correctionFactor * p_prime))
+      
       col_names <- c(col_names, paste0(resp_var, ".p"))
     }
-
+    
     colnames(df) <- col_names
     rownames(df) <- labels
-
+    
     df
   })
-
+  
   df <- bind_cols(ests) %>%
     mutate(
       across(everything(), function(x) {
@@ -390,11 +395,24 @@ estimates_to_csv <- function(
         x
       })
     )
-
+  
   if (transpose) {
     # Transpose, convert back to data frame, reverse columns
     df <- rev(data.frame(t(df), check.names = FALSE))
   }
+  
+  df
+}
+
+# Prints relevant model estimates to a neat csv
+estimates_to_csv <- function(
+  file, 
+  models, 
+  include_corrected = FALSE, 
+  transpose = FALSE, 
+  correctionFactor = NULL
+) {
+  df <- estimates_to_df(models, include_corrected, transpose, correctionFactor)
 
   write.csv(df, file)
 
