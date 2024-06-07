@@ -60,8 +60,9 @@ preproc_acc <- function(raw_acc, sub, verbose = FALSE) {
 
 # Classify typing dynamics as one- or two-handed
 classify_handedness <- function(IKD, distanceFromPrevious) {
-  # If we have less than 3 observations, we cannot estimate our model properly
-  if (sum(!is.na(IKD) & !is.na(distanceFromPrevious)) < 3) {
+  # If we have less than 4 observations, we might not be able to estimate our
+  # model properly
+  if (sum(!is.na(IKD) & !is.na(distanceFromPrevious)) < 4) {
     return(NA)
   }
 
