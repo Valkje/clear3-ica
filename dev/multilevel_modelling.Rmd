@@ -14,9 +14,9 @@ if (!local) {
   # Base directory for the data set we will create
   dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
 } else {
-  wd <- "/Volumes/home/preclineu/lorkno/Documents/Autocorrelation"
+  wd <- "/Volumes/home/preclineu/lorkno/Documents/clear3-ica"
   # Base directory for the data set we will create
-  dat_dir <- "~/HPC_project/data"
+  dat_dir <- "/Volumes/project/3022000.05/projects/lorkno/data"
 }
 
 model_dir <- file.path(dat_dir, "complete_data_models")
@@ -157,33 +157,35 @@ prep_reg_dat <- function(dat_path, ica_path) {
 
 # Plot residuals and random effects for model validation.
 plot_validation <- function(model_df) {
+  col_names <- colnames(model_df)
+  
   # Check for heteroskedasticity of residuals.
   
-  lapply(model_df, function(m) print(plot(m[[1]], main = "Residuals vs. fitted values")))
+  map2(model_df, col_names, function(m, n) print(plot(m[[1]], main = paste0(n, ": Residuals vs. fitted values"))))
   
   # Normality of residuals.
   
-  lapply(model_df, function(m) {
+  map2(model_df, col_names, function(m, n) {
     m <- m[[1]]
-    qqnorm(resid(m), main = "Residuals")
+    qqnorm(resid(m), main = paste0(n, ": Residuals"))
     qqline(resid(m))
   })
   
   # Subject-level random effects.
   
-  lapply(model_df, function(m) {
+  map2(model_df, col_names, function(m, n) {
     m <- m[[1]]
     refs <- ranef(m, level = 1)[[1]]
-    qqnorm(refs, main = "Subject-level random effects")
+    qqnorm(refs, main = paste0(n, ": Subject-level random effects"))
     qqline(refs)
   })
   
   # Week-within-subjects-level random effects.
   
-  lapply(model_df, function(m) {
+  map2(model_df, col_names, function(m, n) {
     m <- m[[1]]
     refs <- ranef(m, level = 2)[[1]]
-    qqnorm(refs, main = "Week-within-subjects-level random effects")
+    qqnorm(refs, main = paste0(n, ": Week-within-subjects-level random effects"))
     qqline(refs)
   })
 }
@@ -1818,3 +1820,64 @@ m20.no_tdia.all.nlme <- dat_c3_no_tdia %>%
 ```{r}
 plot_validation(m20.no_tdia.all.nlme)
 ```
+
+## All self-report items
+
+```{r}
+dat_c1_no_tdia
+```
+
+```{r}
+dat_all_no_tdia <- dat_reg_no_tdia %>%
+  mutate(
+    variable = if_else(modality == "self_report", paste0("X.", variable), variable),
+    value = case_when(
+      modality == "self_report" & min(value) == 0 ~ log(value + 1), # To prevent log(0) = NA values
+      modality == "self_report" ~ log(value),
+      TRUE ~ value
+    ),
+    week = week(date)
+  ) %>%
+  select(-c(modality, study_start_date, treatment_start_date)) %>%
+  pivot_wider(names_from = variable, values_from = value) %>%
+  drop_na() %>%
+  group_by(subject, week) %>%
+  filter(n() > 1) %>%
+  ungroup() %>%
+  mutate(
+    totalKeyPresses = log(totalKeyPresses),
+    across(medianIKD:bed, scale)
+  )
+
+dat_all_no_tdia
+```
+
+
+```{r}
+mAll.no_tdia.X1.nlme <- lme(X.ASIQ9_wishdead ~ medianIKD +
+                             percent95IKD +
+                             madIKD +
+                             autocorrectRate +
+                             backspaceRate +
+                             totalKeyPresses +
+                             active +
+                             upright,
+                           random = ~ 1 | subject / week,
+                           data = dat_all_no_tdia)
+
+mAll.no_tdia.all.nlme <- dat_all_no_tdia %>%
+  summarize(across(starts_with("X", ignore.case = FALSE), 
+                   ~ list(update(mAll.no_tdia.X1.nlme, 
+                                 reformulate(".", cur_column())))))
+```
+
+```{r paged.print=FALSE}
+estimates_to_csv(file.path(dat_dir, "mAll_nlme_p_frag_no-tdia.csv"),
+                 mAll.no_tdia.all.nlme,
+                 include_corrected = TRUE)
+```
+
+```{r}
+plot_validation(mAll.no_tdia.all.nlme)
+```
+
