@@ -4,30 +4,12 @@ output: html_notebook
 ---
 
 ```{r setup}
-local <- TRUE
-
-wd <- ""
-
-if (!local) {
-  # Cluster environment
-  wd <- "~/Documents/Autocorrelation"
-  # Base directory for the data set we will create
-  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
-} else {
-  wd <- "/Volumes/home/preclineu/lorkno/Documents/Autocorrelation"
-  # Base directory for the data set we will create
-  dat_dir <- "~/HPC_project/data"
-}
-
-model_dir <- file.path(dat_dir, "complete_data_models")
+dat_dir <- "/Volumes/project/3022000.05/projects/lorkno/data"
 
 # For manuscript images
 man_img_dir <- file.path("~/Documents/Writing/Papers/Paper 1/images")
 
-# For some reason this sets the pwd only for the current scope, which means it 
-# does not affect anything outside an if block if you set it there.
-# So that's why it's here instead of above.
-setwd(wd) 
+setwd("/Volumes/home/preclineu/lorkno/Documents/clear3-ica")
 
 source("src/load_dependencies.R")
 library(fastICA)
@@ -1819,6 +1801,16 @@ fancy_mix_fig <- function(ica, n_row = 1, lims = c(-0.5, 0.5), ann_x = NULL,
 
 ```{r fig.height=10, paged.print=FALSE}
 fancy_mix_fig(icas$`5`, save_path = file.path(man_img_dir, "mixing_matrix_5_test.pdf"))
+```
+
+```{r fig.height=10, fig.width=12, paged.print=FALSE}
+blog_dir <- "~/Documents/Writing/Papers/Paper 1/Blog post"
+
+fancy_mix_fig(icas$`5`, ann_x = -0.65) +
+  theme(axis.text.y = element_text(size = 12)) + 
+  guides(fill="none")
+
+ggsave(file.path(blog_dir, "Figure2_mixing_matrix_nolegend_2.pdf"))
 ```
 
 ```{r fig.height=10}

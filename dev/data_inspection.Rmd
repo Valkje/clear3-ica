@@ -6,26 +6,13 @@ output: html_notebook
 ```{r setup}
 local <- TRUE
 
-wd <- ""
 
-if (!local) {
-  # Cluster environment
-  wd <- "~/Documents/Autocorrelation"
-  # Base directory for the data set we will create
-  dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
-} else {
-  wd <- "/Volumes/home/preclineu/lorkno/Documents/Autocorrelation"
-  # Base directory for the data set we will create
-  dat_dir <- "~/HPC_project/data"
-}
-
-# For some reason this sets the pwd only for the current scope, which means it 
-# does not affect anything outside an if block if you set it there.
-# So that's why it's here instead of above.
-setwd(wd) 
+dat_dir <- "/Volumes/project/3022000.05/projects/lorkno/data"
 
 # For manuscript images
 man_img_dir <- file.path("~/Documents/Writing/Papers/Paper 1/images")
+
+setwd("/Volumes/home/preclineu/lorkno/Documents/clear3-ica")
 
 source("src/load_dependencies.R")
 ```
@@ -837,6 +824,10 @@ ggplot(timestamps, aes(timestamp, modality)) +
     text = element_text(size = 32),
     axis.text = element_text(size = 35)
   )
+
+blog_dir <- "~/Documents/Writing/Papers/Paper 1/Blog post"
+
+ggsave(file.path(blog_dir, "Figure1_sampling_discrepancies.png"))
 ```
 
 ```{r}
@@ -930,6 +921,8 @@ ggplot(rep_dat %>% filter(subject == 3009), aes(date, value)) +
     axis.text.x = element_text(size = 23),
     axis.title.x = element_text(size = 25)
   )
+
+ggsave(file.path(blog_dir, "Figure2_self-report_dimensionality.png"))
 ```
 
 

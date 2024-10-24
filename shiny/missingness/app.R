@@ -31,9 +31,9 @@ if (!local) {
   # Base directory for the data set we will create
   dat_dir <- "/project_cephfs/3022017.02/projects/lorkno/data"
 } else {
-  wd <- "/Volumes/home/preclineu/lorkno/Documents/Autocorrelation"
+  wd <- "/Volumes/home/preclineu/lorkno/Documents/clear3-ica"
   # Base directory for the data set we will create
-  dat_dir <- "~/HPC_project/data"
+  dat_dir <- "/Volumes/project/3022000.05/projects/lorkno/data"
 }
 
 # Won't work in non-local environment
